@@ -1,0 +1,33 @@
+name: macOS
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check configuration
+        run: |
+          test "$(uname -m)" = arm64
+          legacy_project='HHVacancy''Desk'
+          legacy_bundle='local.sergey.HHVacancy''Desk'
+          ! grep -R -E "${legacy_project}|${legacy_bundle}" HHVacancySber README.md
+          grep -q 'REPLACE_WITH_YOUR_HH_APPLICATION_TOKEN' HHVacancySber/HHVacancySber/HHAuthConfig.swift
+      - name: List project
+        working-directory: HHVacancySber
+        run: xcodebuild -project HHVacancySber.xcodeproj -list
+      - name: Build Debug
+        working-directory: HHVacancySber
+        run: >-
+          xcodebuild -project HHVacancySber.xcodeproj -scheme HHVacancySber
+          -configuration Debug -destination 'platform=macOS,arch=arm64'
+          CODE_SIGNING_ALLOWED=NO build
+      - name: Test Debug
+        working-directory: HHVacancySber
+        run: >-
+          xcodebuild -project HHVacancySber.xcodeproj -scheme HHVacancySber
+          -configuration Debug -destination 'platform=macOS,arch=arm64'
+          CODE_SIGNING_ALLOWED=NO test -only-testing:HHVacancySberTests

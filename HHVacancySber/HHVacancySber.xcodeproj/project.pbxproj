@@ -1,0 +1,631 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		14C76CC72FF9B91E00CF4748 /* HHVacancySberApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14C76CC62FF9B91E00CF4748 /* HHVacancySberApp.swift */; };
+		14C76CC92FF9B91E00CF4748 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14C76CC82FF9B91E00CF4748 /* ContentView.swift */; };
+		14C76CCB2FF9B91E00CF4748 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 14C76CCA2FF9B91E00CF4748 /* Assets.xcassets */; };
+		14C76CCE2FF9B91E00CF4748 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 14C76CCD2FF9B91E00CF4748 /* Preview Assets.xcassets */; };
+		14C76CD92FF9B91F00CF4748 /* HHVacancySberTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14C76CD82FF9B91F00CF4748 /* HHVacancySberTests.swift */; };
+		14C76CE32FF9B91F00CF4748 /* HHVacancySberUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14C76CE22FF9B91F00CF4748 /* HHVacancySberUITests.swift */; };
+		14C76CE52FF9B91F00CF4748 /* HHVacancySberUITestsLaunchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14C76CE42FF9B91F00CF4748 /* HHVacancySberUITestsLaunchTests.swift */; };
+		A10000022FF9BA0000CF4701 /* HHModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012FF9BA0000CF4701 /* HHModels.swift */; };
+		A10000022FF9BA0000CF4702 /* HHAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012FF9BA0000CF4702 /* HHAPIClient.swift */; };
+		A10000022FF9BA0000CF4708 /* HHAuthConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012FF9BA0000CF4708 /* HHAuthConfig.swift */; };
+		B80000000000000000000011 /* EmployerConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = B80000000000000000000001 /* EmployerConfiguration.swift */; };
+		B80000000000000000000012 /* AreaDirectoryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B80000000000000000000002 /* AreaDirectoryStore.swift */; };
+		B80000000000000000000013 /* VacancyCollectionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B80000000000000000000003 /* VacancyCollectionService.swift */; };
+		B80000000000000000000014 /* employers.json in Resources */ = {isa = PBXBuildFile; fileRef = B80000000000000000000004 /* employers.json */; };
+		A10000022FF9BA0000CF4705 /* VacancySearchViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012FF9BA0000CF4705 /* VacancySearchViewModel.swift */; };
+		A10000022FF9BA0000CF4707 /* VacancySearchViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012FF9BA0000CF4707 /* VacancySearchViews.swift */; };
+		A10000022FF9BA0000CF4709 /* FavoriteVacancyStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012FF9BA0000CF4709 /* FavoriteVacancyStore.swift */; };
+		A10000022FF9BA0000CF4710 /* FavoriteVacanciesPDFExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012FF9BA0000CF4710 /* FavoriteVacanciesPDFExporter.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		14C76CD52FF9B91F00CF4748 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 14C76CBB2FF9B91E00CF4748 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 14C76CC22FF9B91E00CF4748;
+			remoteInfo = HHVacancySber;
+		};
+		14C76CDF2FF9B91F00CF4748 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 14C76CBB2FF9B91E00CF4748 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 14C76CC22FF9B91E00CF4748;
+			remoteInfo = HHVacancySber;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		14C76CC32FF9B91E00CF4748 /* СберВакансии.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "СберВакансии.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		14C76CC62FF9B91E00CF4748 /* HHVacancySberApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HHVacancySberApp.swift; sourceTree = "<group>"; };
+		14C76CC82FF9B91E00CF4748 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		14C76CCA2FF9B91E00CF4748 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		14C76CCD2FF9B91E00CF4748 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
+		14C76CCF2FF9B91E00CF4748 /* HHVacancySber.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = HHVacancySber.entitlements; sourceTree = "<group>"; };
+		14C76CD42FF9B91F00CF4748 /* HHVacancySberTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = HHVacancySberTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		14C76CD82FF9B91F00CF4748 /* HHVacancySberTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HHVacancySberTests.swift; sourceTree = "<group>"; };
+		14C76CDE2FF9B91F00CF4748 /* HHVacancySberUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = HHVacancySberUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		14C76CE22FF9B91F00CF4748 /* HHVacancySberUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HHVacancySberUITests.swift; sourceTree = "<group>"; };
+		14C76CE42FF9B91F00CF4748 /* HHVacancySberUITestsLaunchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HHVacancySberUITestsLaunchTests.swift; sourceTree = "<group>"; };
+		A10000012FF9BA0000CF4701 /* HHModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HHModels.swift; sourceTree = "<group>"; };
+		A10000012FF9BA0000CF4702 /* HHAPIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HHAPIClient.swift; sourceTree = "<group>"; };
+		A10000012FF9BA0000CF4708 /* HHAuthConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HHAuthConfig.swift; sourceTree = "<group>"; };
+		B80000000000000000000001 /* EmployerConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmployerConfiguration.swift; sourceTree = "<group>"; };
+		B80000000000000000000002 /* AreaDirectoryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AreaDirectoryStore.swift; sourceTree = "<group>"; };
+		B80000000000000000000003 /* VacancyCollectionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VacancyCollectionService.swift; sourceTree = "<group>"; };
+		B80000000000000000000004 /* employers.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = employers.json; sourceTree = "<group>"; };
+		A10000012FF9BA0000CF4705 /* VacancySearchViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VacancySearchViewModel.swift; sourceTree = "<group>"; };
+		A10000012FF9BA0000CF4707 /* VacancySearchViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VacancySearchViews.swift; sourceTree = "<group>"; };
+		A10000012FF9BA0000CF4709 /* FavoriteVacancyStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FavoriteVacancyStore.swift; sourceTree = "<group>"; };
+		A10000012FF9BA0000CF4710 /* FavoriteVacanciesPDFExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FavoriteVacanciesPDFExporter.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		14C76CC02FF9B91E00CF4748 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		14C76CD12FF9B91F00CF4748 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		14C76CDB2FF9B91F00CF4748 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		14C76CBA2FF9B91E00CF4748 = {
+			isa = PBXGroup;
+			children = (
+				14C76CC52FF9B91E00CF4748 /* HHVacancySber */,
+				14C76CD72FF9B91F00CF4748 /* HHVacancySberTests */,
+				14C76CE12FF9B91F00CF4748 /* HHVacancySberUITests */,
+				14C76CC42FF9B91E00CF4748 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		14C76CC42FF9B91E00CF4748 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				14C76CC32FF9B91E00CF4748 /* СберВакансии.app */,
+				14C76CD42FF9B91F00CF4748 /* HHVacancySberTests.xctest */,
+				14C76CDE2FF9B91F00CF4748 /* HHVacancySberUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		14C76CC52FF9B91E00CF4748 /* HHVacancySber */ = {
+			isa = PBXGroup;
+			children = (
+				14C76CC62FF9B91E00CF4748 /* HHVacancySberApp.swift */,
+				14C76CC82FF9B91E00CF4748 /* ContentView.swift */,
+				A10000012FF9BA0000CF4702 /* HHAPIClient.swift */,
+				A10000012FF9BA0000CF4708 /* HHAuthConfig.swift */,
+				A10000012FF9BA0000CF4701 /* HHModels.swift */,
+				B80000000000000000000001 /* EmployerConfiguration.swift */,
+				B80000000000000000000002 /* AreaDirectoryStore.swift */,
+				B80000000000000000000003 /* VacancyCollectionService.swift */,
+				B80000000000000000000004 /* employers.json */,
+				A10000012FF9BA0000CF4705 /* VacancySearchViewModel.swift */,
+				A10000012FF9BA0000CF4707 /* VacancySearchViews.swift */,
+				A10000012FF9BA0000CF4709 /* FavoriteVacancyStore.swift */,
+				A10000012FF9BA0000CF4710 /* FavoriteVacanciesPDFExporter.swift */,
+				14C76CCA2FF9B91E00CF4748 /* Assets.xcassets */,
+				14C76CCF2FF9B91E00CF4748 /* HHVacancySber.entitlements */,
+				14C76CCC2FF9B91E00CF4748 /* Preview Content */,
+			);
+			path = HHVacancySber;
+			sourceTree = "<group>";
+		};
+		14C76CCC2FF9B91E00CF4748 /* Preview Content */ = {
+			isa = PBXGroup;
+			children = (
+				14C76CCD2FF9B91E00CF4748 /* Preview Assets.xcassets */,
+			);
+			path = "Preview Content";
+			sourceTree = "<group>";
+		};
+		14C76CD72FF9B91F00CF4748 /* HHVacancySberTests */ = {
+			isa = PBXGroup;
+			children = (
+				14C76CD82FF9B91F00CF4748 /* HHVacancySberTests.swift */,
+			);
+			path = HHVacancySberTests;
+			sourceTree = "<group>";
+		};
+		14C76CE12FF9B91F00CF4748 /* HHVacancySberUITests */ = {
+			isa = PBXGroup;
+			children = (
+				14C76CE22FF9B91F00CF4748 /* HHVacancySberUITests.swift */,
+				14C76CE42FF9B91F00CF4748 /* HHVacancySberUITestsLaunchTests.swift */,
+			);
+			path = HHVacancySberUITests;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		14C76CC22FF9B91E00CF4748 /* HHVacancySber */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 14C76CE82FF9B91F00CF4748 /* Build configuration list for PBXNativeTarget "HHVacancySber" */;
+			buildPhases = (
+				14C76CBF2FF9B91E00CF4748 /* Sources */,
+				14C76CC02FF9B91E00CF4748 /* Frameworks */,
+				14C76CC12FF9B91E00CF4748 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = HHVacancySber;
+			productName = HHVacancySber;
+			productReference = 14C76CC32FF9B91E00CF4748 /* СберВакансии.app */;
+			productType = "com.apple.product-type.application";
+		};
+		14C76CD32FF9B91F00CF4748 /* HHVacancySberTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 14C76CEB2FF9B91F00CF4748 /* Build configuration list for PBXNativeTarget "HHVacancySberTests" */;
+			buildPhases = (
+				14C76CD02FF9B91F00CF4748 /* Sources */,
+				14C76CD12FF9B91F00CF4748 /* Frameworks */,
+				14C76CD22FF9B91F00CF4748 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				14C76CD62FF9B91F00CF4748 /* PBXTargetDependency */,
+			);
+			name = HHVacancySberTests;
+			productName = HHVacancySberTests;
+			productReference = 14C76CD42FF9B91F00CF4748 /* HHVacancySberTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		14C76CDD2FF9B91F00CF4748 /* HHVacancySberUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 14C76CEE2FF9B91F00CF4748 /* Build configuration list for PBXNativeTarget "HHVacancySberUITests" */;
+			buildPhases = (
+				14C76CDA2FF9B91F00CF4748 /* Sources */,
+				14C76CDB2FF9B91F00CF4748 /* Frameworks */,
+				14C76CDC2FF9B91F00CF4748 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				14C76CE02FF9B91F00CF4748 /* PBXTargetDependency */,
+			);
+			name = HHVacancySberUITests;
+			productName = HHVacancySberUITests;
+			productReference = 14C76CDE2FF9B91F00CF4748 /* HHVacancySberUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		14C76CBB2FF9B91E00CF4748 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1520;
+				LastUpgradeCheck = 1520;
+				TargetAttributes = {
+					14C76CC22FF9B91E00CF4748 = {
+						CreatedOnToolsVersion = 15.2;
+					};
+					14C76CD32FF9B91F00CF4748 = {
+						CreatedOnToolsVersion = 15.2;
+						TestTargetID = 14C76CC22FF9B91E00CF4748;
+					};
+					14C76CDD2FF9B91F00CF4748 = {
+						CreatedOnToolsVersion = 15.2;
+						TestTargetID = 14C76CC22FF9B91E00CF4748;
+					};
+				};
+			};
+			buildConfigurationList = 14C76CBE2FF9B91E00CF4748 /* Build configuration list for PBXProject "HHVacancySber" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 14C76CBA2FF9B91E00CF4748;
+			productRefGroup = 14C76CC42FF9B91E00CF4748 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				14C76CC22FF9B91E00CF4748 /* HHVacancySber */,
+				14C76CD32FF9B91F00CF4748 /* HHVacancySberTests */,
+				14C76CDD2FF9B91F00CF4748 /* HHVacancySberUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		14C76CC12FF9B91E00CF4748 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B80000000000000000000014 /* employers.json in Resources */,
+				14C76CCE2FF9B91E00CF4748 /* Preview Assets.xcassets in Resources */,
+				14C76CCB2FF9B91E00CF4748 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		14C76CD22FF9B91F00CF4748 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		14C76CDC2FF9B91F00CF4748 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		14C76CBF2FF9B91E00CF4748 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				14C76CC92FF9B91E00CF4748 /* ContentView.swift in Sources */,
+				A10000022FF9BA0000CF4702 /* HHAPIClient.swift in Sources */,
+				A10000022FF9BA0000CF4708 /* HHAuthConfig.swift in Sources */,
+				A10000022FF9BA0000CF4701 /* HHModels.swift in Sources */,
+				14C76CC72FF9B91E00CF4748 /* HHVacancySberApp.swift in Sources */,
+				B80000000000000000000011 /* EmployerConfiguration.swift in Sources */,
+				B80000000000000000000012 /* AreaDirectoryStore.swift in Sources */,
+				B80000000000000000000013 /* VacancyCollectionService.swift in Sources */,
+				A10000022FF9BA0000CF4705 /* VacancySearchViewModel.swift in Sources */,
+				A10000022FF9BA0000CF4707 /* VacancySearchViews.swift in Sources */,
+				A10000022FF9BA0000CF4709 /* FavoriteVacancyStore.swift in Sources */,
+				A10000022FF9BA0000CF4710 /* FavoriteVacanciesPDFExporter.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		14C76CD02FF9B91F00CF4748 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				14C76CD92FF9B91F00CF4748 /* HHVacancySberTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		14C76CDA2FF9B91F00CF4748 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				14C76CE32FF9B91F00CF4748 /* HHVacancySberUITests.swift in Sources */,
+				14C76CE52FF9B91F00CF4748 /* HHVacancySberUITestsLaunchTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		14C76CD62FF9B91F00CF4748 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 14C76CC22FF9B91E00CF4748 /* HHVacancySber */;
+			targetProxy = 14C76CD52FF9B91F00CF4748 /* PBXContainerItemProxy */;
+		};
+		14C76CE02FF9B91F00CF4748 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 14C76CC22FF9B91E00CF4748 /* HHVacancySber */;
+			targetProxy = 14C76CDF2FF9B91F00CF4748 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		14C76CE62FF9B91F00CF4748 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ARCHS = arm64;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		14C76CE72FF9B91F00CF4748 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ARCHS = arm64;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		14C76CE92FF9B91F00CF4748 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = HHVacancySber/HHVacancySber.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 3;
+				DEVELOPMENT_ASSET_PATHS = "\"HHVacancySber/Preview Content\"";
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = NO;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = HHVacancySber/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = local.sergey.HHVacancySber;
+				PRODUCT_MODULE_NAME = HHVacancySber;
+				PRODUCT_NAME = "СберВакансии";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		14C76CEA2FF9B91F00CF4748 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = HHVacancySber/HHVacancySber.entitlements;
+				CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 3;
+				DEVELOPMENT_ASSET_PATHS = "\"HHVacancySber/Preview Content\"";
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = HHVacancySber/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = local.sergey.HHVacancySber;
+				PRODUCT_MODULE_NAME = HHVacancySber;
+				PRODUCT_NAME = "СберВакансии";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		14C76CEC2FF9B91F00CF4748 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = local.sergey.HHVacancySberTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/СберВакансии.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/СберВакансии";
+			};
+			name = Debug;
+		};
+		14C76CED2FF9B91F00CF4748 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = local.sergey.HHVacancySberTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/СберВакансии.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/СберВакансии";
+			};
+			name = Release;
+		};
+		14C76CEF2FF9B91F00CF4748 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = local.sergey.HHVacancySberUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_TARGET_NAME = HHVacancySber;
+			};
+			name = Debug;
+		};
+		14C76CF02FF9B91F00CF4748 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = local.sergey.HHVacancySberUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_TARGET_NAME = HHVacancySber;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		14C76CBE2FF9B91E00CF4748 /* Build configuration list for PBXProject "HHVacancySber" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				14C76CE62FF9B91F00CF4748 /* Debug */,
+				14C76CE72FF9B91F00CF4748 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		14C76CE82FF9B91F00CF4748 /* Build configuration list for PBXNativeTarget "HHVacancySber" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				14C76CE92FF9B91F00CF4748 /* Debug */,
+				14C76CEA2FF9B91F00CF4748 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		14C76CEB2FF9B91F00CF4748 /* Build configuration list for PBXNativeTarget "HHVacancySberTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				14C76CEC2FF9B91F00CF4748 /* Debug */,
+				14C76CED2FF9B91F00CF4748 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		14C76CEE2FF9B91F00CF4748 /* Build configuration list for PBXNativeTarget "HHVacancySberUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				14C76CEF2FF9B91F00CF4748 /* Debug */,
+				14C76CF02FF9B91F00CF4748 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 14C76CBB2FF9B91E00CF4748 /* Project object */;
+}
