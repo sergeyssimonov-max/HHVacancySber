@@ -382,9 +382,6 @@ struct HHVacancyDetails: Codable, Equatable, Identifiable {
         self.videoVacancy = videoVacancy
     }
 
-    var isMoscowVacancy: Bool {
-        area?.id == "1" || area?.name == "Москва"
-    }
 }
 
 struct HHEmployer: Codable, Equatable {
@@ -682,6 +679,10 @@ struct VacancySearchResult: Identifiable {
         details.department?.name?.nilIfBlank ?? summary.department?.name?.nilIfBlank
     }
 
+    var publishedAt: String? {
+        summary.publishedAt ?? details.publishedAt
+    }
+
     var areaName: String {
         location.displayName
     }
@@ -731,15 +732,6 @@ extension String {
     var nilIfBlank: String? {
         let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
-    }
-
-    var strippingHTMLTags: String {
-        replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
-            .replacingOccurrences(of: "&nbsp;", with: " ")
-            .replacingOccurrences(of: "&amp;", with: "&")
-            .replacingOccurrences(of: "&quot;", with: "\"")
-            .replacingOccurrences(of: "&#39;", with: "'")
-            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
     }
 
     var readableHTMLText: String {

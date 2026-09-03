@@ -9,13 +9,6 @@ enum VacancyListMode: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-enum VacancySortOrder: String, CaseIterable, Identifiable {
-    case newest = "Сначала новые"
-    case employer = "По работодателю"
-    case subject = "По субъекту"
-    var id: String { rawValue }
-}
-
 struct VacancyFilterOption: Identifiable, Equatable {
     let id: String
     let title: String
@@ -30,6 +23,7 @@ private struct VacancySearchCache {
 final class VacancySearchViewModel: ObservableObject {
     static let searchCacheTTL: TimeInterval = 10 * 60
     static let archiveCheckInterval: TimeInterval = 30 * 60
+    private static let publicationDateFormatter = ISO8601DateFormatter()
 
     @Published private(set) var results: [VacancySearchResult] = []
     @Published private(set) var favorites: [FavoriteVacancyRecord] = []
@@ -43,10 +37,14 @@ final class VacancySearchViewModel: ObservableObject {
     @Published private(set) var updatedAtMessage: String?
     @Published private(set) var favoritesWarning: String?
     @Published private(set) var hasSearched = false
-    @Published var displayMode: VacancyListMode = .all { didSet { reconcileExpanded() } }
+    @Published var displayMode: VacancyListMode = .all {
+        didSet {
+            normalizeFilters()
+            reconcileExpanded()
+        }
+    }
     @Published var selectedEmployerID = "all" { didSet { reconcileExpanded() } }
     @Published var selectedRegionID = "all" { didSet { reconcileExpanded() } }
-    @Published var sortOrder: VacancySortOrder = .newest
 
     private let apiClient: any HHVacancyAPIClient
     private let employerStore: any EmployerConfigurationStoring
@@ -61,6 +59,9 @@ final class VacancySearchViewModel: ObservableObject {
     private var pendingPersistenceSnapshot: (revision: Int, values: [FavoriteVacancyRecord])?
     private var persistenceRevision = 0
     private var isPersistenceDriverRunning = false
+    private var isFavoritesPersistenceWritable = false
+    private var isArchiveCheckRunning = false
+    private var resultsRevision = 0
 
     init(
         apiClient: any HHVacancyAPIClient = HHAPIClient(),
@@ -83,30 +84,54 @@ final class VacancySearchViewModel: ObservableObject {
     var canSearch: Bool { isPersistenceLoaded && !isLoading }
     var isShowingFavorites: Bool { displayMode == .favorites }
     var canExportFavoritesPDF: Bool { !favorites.isEmpty && !isExportingFavoritesPDF }
+    var displayedVacancyCountMessage: String { "Показано вакансий: \(displayedResults.count)" }
 
     var employerFilterOptions: [VacancyFilterOption] {
-        let values = Dictionary(grouping: unfilteredResults.compactMap { result -> VacancyFilterOption? in
-            guard let id = result.employerID else { return nil }
-            return VacancyFilterOption(id: id, title: result.employerName)
-        }, by: \.id).compactMap { $0.value.first }
+        var titlesByID: [String: String] = [:]
+        for result in unfilteredResults {
+            guard let id = result.employerID, titlesByID[id] == nil else { continue }
+            titlesByID[id] = result.employerName
+        }
+        let values = titlesByID.map { VacancyFilterOption(id: $0.key, title: $0.value) }
         return [.init(id: "all", title: "Все работодатели")] + values.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
     }
 
     var regionFilterOptions: [VacancyFilterOption] {
-        let values = Dictionary(grouping: unfilteredResults.map {
-            VacancyFilterOption(id: $0.location.filterID, title: $0.location.kind == .subject ? ($0.location.subjectName ?? $0.areaName) : $0.areaName)
-        }, by: \.id).compactMap { $0.value.first }
+        var titlesByID: [String: String] = [:]
+        for result in unfilteredResults {
+            let id = result.location.filterID
+            guard titlesByID[id] == nil else { continue }
+            titlesByID[id] = result.location.kind == .subject
+                ? (result.location.subjectName ?? result.areaName)
+                : result.areaName
+        }
+        let values = titlesByID.map { VacancyFilterOption(id: $0.key, title: $0.value) }
         return [.init(id: "all", title: "Все регионы")] + values.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
     }
 
     var displayedResults: [VacancySearchResult] {
-        unfilteredResults
-            .filter { selectedEmployerID == "all" || $0.employerID == selectedEmployerID }
-            .filter { selectedRegionID == "all" || $0.location.filterID == selectedRegionID }
-            .sorted(by: sortPredicate)
+        let values = unfilteredResults
+        let filtered: [VacancySearchResult]
+        switch (selectedEmployerID == "all", selectedRegionID == "all") {
+        case (true, true):
+            filtered = values
+        case (false, true):
+            filtered = values.filter { $0.employerID == selectedEmployerID }
+        case (true, false):
+            filtered = values.filter { $0.location.filterID == selectedRegionID }
+        case (false, false):
+            filtered = values
+                .filter { $0.employerID == selectedEmployerID }
+                .filter { $0.location.filterID == selectedRegionID }
+        }
+        switch displayMode {
+        case .all:
+            return filtered
+        case .favorites:
+            return orderedNewestFirst(filtered)
+        }
     }
 
-    var expandedVacancy: VacancySearchResult? { displayedResults.first { $0.id == expandedVacancyID } }
     func isFavorite(id: String) -> Bool { favorites.contains { $0.id == id } }
 
     private var unfilteredResults: [VacancySearchResult] {
@@ -120,7 +145,10 @@ final class VacancySearchViewModel: ObservableObject {
 
     func loadPersistenceIfNeeded() async {
         guard !isPersistenceLoaded else { return }
-        do { favorites = try favoritesStore.load().sorted { $0.favoritedAt > $1.favoritedAt } }
+        do {
+            favorites = try favoritesStore.load().sorted { $0.favoritedAt > $1.favoritedAt }
+            isFavoritesPersistenceWritable = true
+        }
         catch { favoritesWarning = error.localizedDescription }
         isPersistenceLoaded = true
     }
@@ -134,6 +162,7 @@ final class VacancySearchViewModel: ObservableObject {
         let now = currentDate()
         if useCache, let cache, now.timeIntervalSince(cache.updatedAt) >= 0,
            now.timeIntervalSince(cache.updatedAt) < Self.searchCacheTTL {
+            resultsRevision += 1
             results = cache.values
             hasSearched = true
             updatedAtMessage = timeMessage(cache.updatedAt)
@@ -146,7 +175,6 @@ final class VacancySearchViewModel: ObservableObject {
         isLoading = true
         hasSearched = true
         errorMessage = nil
-        let previous = results
         defer { isLoading = false }
         do {
             let employers = try employerStore.loadOrCreate().employers
@@ -158,7 +186,7 @@ final class VacancySearchViewModel: ObservableObject {
                 self?.statusMessage = "\(progress.employerName): загружено \(progress.loadedCount), \(progress.partition)."
             }
             try Task.checkCancellation()
-            let values = summaries.map { summary -> VacancySearchResult in
+            let values = orderedNewestFirst(summaries.map { summary -> VacancySearchResult in
                 let fallback = HHVacancyDetails(
                     id: summary.id,
                     name: summary.name,
@@ -177,17 +205,16 @@ final class VacancySearchViewModel: ObservableObject {
                     details: fallback,
                     location: areaSnapshot.index.location(for: summary)
                 )
-            }
+            })
+            resultsRevision += 1
             results = values
             cache = VacancySearchCache(values: values, updatedAt: now)
             updatedAtMessage = timeMessage(now)
             statusMessage = values.isEmpty ? "У выбранных работодателей нет открытых вакансий." : "Готово: \(values.count) уникальных вакансий."
             normalizeFilters()
         } catch is CancellationError {
-            results = previous
             statusMessage = "Поиск отменён."
         } catch {
-            results = previous
             errorMessage = error.localizedDescription
             statusMessage = "Поиск не завершён; сохранена предыдущая полная выборка."
         }
@@ -200,24 +227,26 @@ final class VacancySearchViewModel: ObservableObject {
         detailTask = Task { [weak self] in await self?.loadVacancyDetails(id: id) }
     }
 
-    func scheduleVacancyDetailsLoad(id: String) { toggleExplanation(for: id) }
-
     func loadVacancyDetails(id: String) async {
         guard let index = results.firstIndex(where: { $0.id == id }) else { return }
+        let revision = resultsRevision
         if let cached = detailsCache[id] { apply(details: cached, at: index); return }
         let current = results[index]
         results[index] = current.updatingDetailState(isLoading: true, errorMessage: nil)
         do {
             let details = try await apiClient.vacancyDetails(id: id)
             try Task.checkCancellation()
+            guard revision == resultsRevision else { return }
             detailsCache[id] = details
             guard let newIndex = results.firstIndex(where: { $0.id == id }) else { return }
             apply(details: details, at: newIndex)
         } catch is CancellationError {
+            guard revision == resultsRevision else { return }
             if let newIndex = results.firstIndex(where: { $0.id == id }) {
                 results[newIndex] = results[newIndex].updatingDetailState(isLoading: false, errorMessage: nil)
             }
         } catch {
+            guard revision == resultsRevision else { return }
             if let newIndex = results.firstIndex(where: { $0.id == id }) {
                 results[newIndex] = results[newIndex].updatingDetailState(isLoading: false, errorMessage: "Не удалось загрузить описание: \(error.localizedDescription)")
             }
@@ -244,7 +273,13 @@ final class VacancySearchViewModel: ObservableObject {
     }
 
     func toggleFavorite(id: String) {
-        if let index = favorites.firstIndex(where: { $0.id == id }) { favorites.remove(at: index); persistFavorites(); reconcileExpanded(); return }
+        if let index = favorites.firstIndex(where: { $0.id == id }) {
+            favorites.remove(at: index)
+            normalizeFilters()
+            persistFavorites()
+            reconcileExpanded()
+            return
+        }
         guard let value = unfilteredResults.first(where: { $0.id == id }) else { return }
         let now = currentDate()
         favorites.append(.init(result: value, favoritedAt: now, updatedAt: now, archiveCheckedAt: value.archiveCheckedAt))
@@ -253,6 +288,7 @@ final class VacancySearchViewModel: ObservableObject {
     }
 
     private func persistFavorites() {
+        guard isFavoritesPersistenceWritable else { return }
         persistenceRevision += 1
         pendingPersistenceSnapshot = (persistenceRevision, favorites)
         guard !isPersistenceDriverRunning else { return }
@@ -279,22 +315,53 @@ final class VacancySearchViewModel: ObservableObject {
         saveTask = nil
     }
 
-    func retryFavoritesPersistence() { persistFavorites() }
     func waitForPendingFavoritesSaves() async {
         while let task = saveTask { await task.value }
     }
 
     func checkArchiveStatusesIfNeeded() async {
         await loadPersistenceIfNeeded()
+        guard !isArchiveCheckRunning else { return }
+        isArchiveCheckRunning = true
+        defer { isArchiveCheckRunning = false }
         let due = currentDate().addingTimeInterval(-Self.archiveCheckInterval)
-        for id in Set(favorites.filter { ($0.archiveCheckedAt ?? .distantPast) < due }.map(\.id)) {
+        var didUpdate = false
+        var seenIDs = Set<String>()
+        let dueIDs: [String] = favorites.compactMap { favorite in
+            guard (favorite.archiveCheckedAt ?? .distantPast) < due,
+                  seenIDs.insert(favorite.id).inserted else { return nil }
+            return favorite.id
+        }
+        for id in dueIDs {
             do {
                 let details = try await apiClient.vacancyDetails(id: id)
                 guard let archived = details.archived, let index = favorites.firstIndex(where: { $0.id == id }) else { continue }
                 favorites[index].updateArchiveStatus(archived, checkedAt: currentDate())
-            } catch { break }
+                didUpdate = true
+            } catch let error as HHAPIError where error.isNotFound {
+                guard let index = favorites.firstIndex(where: { $0.id == id }) else { continue }
+                let archived = favorites[index].isArchived
+                favorites[index].updateArchiveStatus(archived, checkedAt: currentDate())
+                didUpdate = true
+            } catch is CancellationError {
+                return
+            } catch let error as HHAPIError where shouldStopArchiveCheckCycle(after: error) {
+                break
+            } catch {
+                continue
+            }
         }
-        persistFavorites()
+        if didUpdate { persistFavorites() }
+    }
+
+    private func shouldStopArchiveCheckCycle(after error: HHAPIError) -> Bool {
+        switch error {
+        case .missingApplicationToken, .placeholderApplicationToken, .unauthorized,
+             .forbidden, .rateLimited, .captchaRequired:
+            return true
+        default:
+            return false
+        }
     }
 
     func openVacancyURL(id: String) {
@@ -374,28 +441,22 @@ final class VacancySearchViewModel: ObservableObject {
         }
     }
 
-    nonisolated static func exportText(for vacancy: VacancySearchResult) -> String { VacancyPDFFormatter.text(for: vacancy) }
-
     private func result(_ id: String) -> VacancySearchResult? { unfilteredResults.first { $0.id == id } }
     private func reconcileExpanded() { if let id = expandedVacancyID, !displayedResults.contains(where: { $0.id == id }) { expandedVacancyID = nil } }
     private func normalizeFilters() {
         if !employerFilterOptions.contains(where: { $0.id == selectedEmployerID }) { selectedEmployerID = "all" }
         if !regionFilterOptions.contains(where: { $0.id == selectedRegionID }) { selectedRegionID = "all" }
     }
-    private func sortPredicate(_ left: VacancySearchResult, _ right: VacancySearchResult) -> Bool {
-        let comparison: ComparisonResult
-        switch sortOrder {
-        case .newest:
-            let formatter = ISO8601DateFormatter()
-            let leftDate = left.summary.publishedAt.flatMap { formatter.date(from: $0) }
-            let rightDate = right.summary.publishedAt.flatMap { formatter.date(from: $0) }
-            if leftDate != rightDate { return (leftDate ?? .distantPast) > (rightDate ?? .distantPast) }
-            comparison = left.name.localizedCaseInsensitiveCompare(right.name)
-        case .employer: comparison = left.employerName.localizedCaseInsensitiveCompare(right.employerName)
-        case .subject: comparison = left.areaName.localizedCaseInsensitiveCompare(right.areaName)
+    private func orderedNewestFirst(_ values: [VacancySearchResult]) -> [VacancySearchResult] {
+        let datedValues = values.map { value in
+            (value: value, date: value.publishedAt.flatMap { Self.publicationDateFormatter.date(from: $0) })
         }
-        if comparison == .orderedSame { return left.id < right.id }
-        return comparison == .orderedAscending
+        return datedValues.sorted { left, right in
+            if left.date != right.date { return (left.date ?? .distantPast) > (right.date ?? .distantPast) }
+            let comparison = left.value.name.localizedCaseInsensitiveCompare(right.value.name)
+            if comparison == .orderedSame { return left.value.id < right.value.id }
+            return comparison == .orderedAscending
+        }.map(\.value)
     }
     private func timeMessage(_ date: Date) -> String {
         let formatter = DateFormatter(); formatter.locale = Locale(identifier: "ru_RU"); formatter.timeStyle = .short; formatter.dateStyle = .none

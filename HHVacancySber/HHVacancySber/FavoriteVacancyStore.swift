@@ -6,6 +6,7 @@ struct FavoriteVacancyRecord: Codable, Equatable, Identifiable, Sendable {
     var employerID: String?
     var employerName: String
     var departmentName: String?
+    var publishedAt: String?
     var location: VacancyLocation
     var salaryText: String?
     var alternateURL: String?
@@ -23,6 +24,7 @@ struct FavoriteVacancyRecord: Codable, Equatable, Identifiable, Sendable {
         employerID = result.employerID
         employerName = result.employerName
         departmentName = result.departmentName
+        publishedAt = result.publishedAt
         location = result.location
         salaryText = result.salaryText
         alternateURL = result.alternateURL
@@ -42,6 +44,7 @@ struct FavoriteVacancyRecord: Codable, Equatable, Identifiable, Sendable {
         employerID = result.employerID ?? employerID
         employerName = result.employerName.nilIfBlank ?? employerName
         departmentName = result.departmentName ?? departmentName
+        publishedAt = result.publishedAt ?? publishedAt
         location = result.location
         salaryText = result.salaryText ?? salaryText
         alternateURL = result.alternateURL ?? alternateURL
@@ -70,7 +73,8 @@ struct FavoriteVacancyRecord: Codable, Equatable, Identifiable, Sendable {
             alternateURL: alternateURL,
             url: nil,
             snippet: HHVacancySnippet(requirement: snippet, responsibility: nil),
-            department: departmentName.map { HHNamedItem(name: $0) }
+            department: departmentName.map { HHNamedItem(name: $0) },
+            publishedAt: publishedAt
         )
         let details = detailsSnapshot ?? HHVacancyDetails(
             id: id,
@@ -96,9 +100,8 @@ struct FavoriteVacancyRecord: Codable, Equatable, Identifiable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, employerID, employerName, departmentName, location, salaryText, alternateURL
+        case id, name, employerID, employerName, departmentName, publishedAt, location, salaryText, alternateURL
         case snippet, descriptionHTML, detailsSnapshot, isArchived, archiveCheckedAt, favoritedAt, updatedAt
-        case areaName
     }
 
     func encode(to encoder: Encoder) throws {
@@ -108,6 +111,7 @@ struct FavoriteVacancyRecord: Codable, Equatable, Identifiable, Sendable {
         try values.encodeIfPresent(employerID, forKey: .employerID)
         try values.encode(employerName, forKey: .employerName)
         try values.encodeIfPresent(departmentName, forKey: .departmentName)
+        try values.encodeIfPresent(publishedAt, forKey: .publishedAt)
         try values.encode(location, forKey: .location)
         try values.encodeIfPresent(salaryText, forKey: .salaryText)
         try values.encodeIfPresent(alternateURL, forKey: .alternateURL)
@@ -127,6 +131,7 @@ struct FavoriteVacancyRecord: Codable, Equatable, Identifiable, Sendable {
         employerID = try values.decodeIfPresent(String.self, forKey: .employerID)
         employerName = try values.decode(String.self, forKey: .employerName)
         departmentName = try values.decodeIfPresent(String.self, forKey: .departmentName)
+        publishedAt = try values.decodeIfPresent(String.self, forKey: .publishedAt)
         detailsSnapshot = try values.decodeIfPresent(HHVacancyDetails.self, forKey: .detailsSnapshot)
         if let stored = try values.decodeIfPresent(VacancyLocation.self, forKey: .location) {
             location = stored
@@ -178,9 +183,7 @@ struct FavoriteVacancyStore: FavoriteVacancyStoring, @unchecked Sendable {
 
     var fileURL: URL {
         if let configuredFileURL { return configuredFileURL }
-        let base = (try? fileManager.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true))
-            ?? fileManager.temporaryDirectory
-        return base.appendingPathComponent("HHVacancySber", isDirectory: true).appendingPathComponent("favorites.json")
+        return ApplicationSupportLocation.fileURL(named: "favorites.json", fileManager: fileManager)
     }
 
     func load() throws -> [FavoriteVacancyRecord] {

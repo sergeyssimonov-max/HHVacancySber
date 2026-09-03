@@ -1,40 +1,16 @@
-# Локальный checklist application token hh.ru
+# Проверка встроенного application token hh.ru
 
-Репозиторий содержит только placeholder. Реальный application token никогда не добавляется в Git, test fixtures, логи, сообщения об ошибках или скриншоты.
+Application token осознанно хранится в `HHVacancySber/HHVacancySber/HHAuthConfig.swift` и входит в конфигурацию приватного репозитория. Чистый checkout не требует ручной установки token.
 
-## Получение и установка
+Значение token не должно появляться в UI, логах, сообщениях об ошибках, test fixtures, screenshots или CI output. Не заменяйте его placeholder перед commit.
 
-1. Создайте приложение в [кабинете разработчика hh.ru](https://dev.hh.ru/admin) и получите application token по актуальной документации API.
-2. Откройте `HHVacancySber/HHVacancySber/HHAuthConfig.swift`.
-3. Локально замените `REPLACE_WITH_YOUR_HH_APPLICATION_TOKEN` реальным значением. Не передавайте это изменение в commit.
-
-Для проверки token из shell вводите значение скрыто:
+## Безопасная структурная проверка
 
 ```zsh
-printf 'Application token: '
-read -s HH_SBER_TOKEN
-printf '\n'
-curl -i 'https://api.hh.ru/me' \
-  -H "Authorization: Bearer ${HH_SBER_TOKEN}" \
-  -H 'HH-User-Agent: HHVacancySber/1.0 (prionium@yandex.ru)' \
-  -H 'User-Agent: HHVacancySber/1.0 (prionium@yandex.ru)' \
-  -H 'Accept: application/json'
-unset HH_SBER_TOKEN
+auth_config='HHVacancySber/HHVacancySber/HHAuthConfig.swift'
+grep -Eq 'static let appAccessToken = "[^"]+"' "$auth_config"
+! grep -q 'static let appAccessToken = placeholderAccessToken' "$auth_config"
+! grep -q 'static let appAccessToken = "REPLACE_WITH_YOUR_HH_APPLICATION_TOKEN"' "$auth_config"
 ```
 
-## Проверка перед commit
-
-Проверяйте только короткий уникальный фрагмент token, не печатая само значение:
-
-```zsh
-rg -l 'TOKEN_FRAGMENT' . --glob '!.git/**'
-git diff -- HHVacancySber/HHVacancySber/HHAuthConfig.swift
-```
-
-Ожидаемое состояние tracked-файла:
-
-```swift
-static let appAccessToken = "REPLACE_WITH_YOUR_HH_APPLICATION_TOKEN"
-```
-
-После локальной сборки верните placeholder до создания commit. При подозрении на утечку немедленно отзовите token в кабинете hh.ru.
+Эта проверка подтверждает форму конфигурации, не печатая секрет. Работоспособность проверяется read-only запросом к hh.ru с теми же Bearer и User-Agent headers, которые использует приложение.

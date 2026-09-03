@@ -6,6 +6,13 @@ enum VacancySearchViews {
         @ObservedObject var viewModel: VacancySearchViewModel
         let refresh: () -> Void
 
+        private enum ToolbarMetrics {
+            static let controlHeight: CGFloat = 32
+            static let modeWidth: CGFloat = 220
+            static let statusWidth: CGFloat = 140
+            static let refreshWidth: CGFloat = 160
+        }
+
         var body: some View {
             VStack(spacing: 0) {
                 toolbar
@@ -17,38 +24,46 @@ enum VacancySearchViews {
         }
 
         private var toolbar: some View {
-            VStack(spacing: 8) {
-                HStack(spacing: 16) {
-                    Picker("", selection: $viewModel.displayMode) {
-                        Text("Вакансии").tag(VacancyListMode.all)
-                        Text(viewModel.favorites.isEmpty ? "Избранное" : "Избранное · \(viewModel.favorites.count)").tag(VacancyListMode.favorites)
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(width: 250)
-                    .accessibilityIdentifier("vacancyListModePicker")
-                    Spacer()
-                    if let updated = viewModel.updatedAtMessage { Text(updated).font(.caption).foregroundColor(.secondary) }
-                    Button(viewModel.isLoading ? "Обновление…" : "Обновить выборку", action: refresh)
-                        .buttonStyle(.borderedProminent)
-                        .disabled(!viewModel.canSearch)
-                        .accessibilityIdentifier("searchVacanciesButton")
+            HStack(spacing: 12) {
+                Picker("", selection: $viewModel.displayMode) {
+                    Text("Вакансии").tag(VacancyListMode.all)
+                    Text(viewModel.favorites.isEmpty ? "Избранное" : "Избранное · \(viewModel.favorites.count)").tag(VacancyListMode.favorites)
                 }
-                HStack(spacing: 12) {
-                    Picker("Работодатель", selection: $viewModel.selectedEmployerID) {
-                        ForEach(viewModel.employerFilterOptions) { Text($0.title).tag($0.id) }
-                    }
-                    .frame(maxWidth: 300)
-                    Picker("Субъект", selection: $viewModel.selectedRegionID) {
-                        ForEach(viewModel.regionFilterOptions) { Text($0.title).tag($0.id) }
-                    }
-                    .frame(maxWidth: 320)
-                    Picker("Сортировка", selection: $viewModel.sortOrder) {
-                        ForEach(VacancySortOrder.allCases) { Text($0.rawValue).tag($0) }
-                    }
-                    .frame(maxWidth: 260)
-                    Spacer()
+                .pickerStyle(.segmented)
+                .frame(width: ToolbarMetrics.modeWidth, height: ToolbarMetrics.controlHeight)
+                .accessibilityIdentifier("vacancyListModePicker")
+
+                Picker("Работодатель", selection: $viewModel.selectedEmployerID) {
+                    ForEach(viewModel.employerFilterOptions) { Text($0.title).tag($0.id) }
                 }
+                .labelsHidden()
+                .frame(minWidth: 150, maxWidth: .infinity)
+                .frame(height: ToolbarMetrics.controlHeight)
+                .accessibilityIdentifier("employerFilterPicker")
+
+                Picker("Субъект", selection: $viewModel.selectedRegionID) {
+                    ForEach(viewModel.regionFilterOptions) { Text($0.title).tag($0.id) }
+                }
+                .labelsHidden()
+                .frame(minWidth: 150, maxWidth: .infinity)
+                .frame(height: ToolbarMetrics.controlHeight)
+                .accessibilityIdentifier("regionFilterPicker")
+
+                Text(viewModel.updatedAtMessage ?? " ")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .frame(width: ToolbarMetrics.statusWidth, height: ToolbarMetrics.controlHeight, alignment: .trailing)
+                    .accessibilityHidden(viewModel.updatedAtMessage == nil)
+                    .accessibilityIdentifier("vacancyUpdateStatus")
+
+                Button(viewModel.isLoading ? "Обновление…" : "Обновить выборку", action: refresh)
+                    .buttonStyle(.borderedProminent)
+                    .frame(width: ToolbarMetrics.refreshWidth, height: ToolbarMetrics.controlHeight)
+                    .disabled(!viewModel.canSearch)
+                    .accessibilityIdentifier("searchVacanciesButton")
             }
+            .controlSize(.large)
             .padding(.horizontal, 20)
             .padding(.vertical, 10)
             .background(DeskPalette.toolbar)
@@ -72,7 +87,11 @@ enum VacancySearchViews {
         private var results: some View {
             VStack(spacing: 0) {
                 HStack {
-                    Text(viewModel.statusMessage ?? "\(viewModel.displayedResults.count) вакансий")
+                    Text(viewModel.displayedVacancyCountMessage)
+                        .accessibilityIdentifier("displayedVacancyCount")
+                    if viewModel.isLoading, let status = viewModel.statusMessage {
+                        Text("· \(status)")
+                    }
                     Spacer()
                     if viewModel.isShowingFavorites {
                         if let progress = viewModel.favoritesPDFExportProgress {

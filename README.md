@@ -9,7 +9,7 @@
 - разбиение выдачи глубже ограничения API в 2000 результатов по регионам и датам;
 - семидневный кэш дерева `/areas` с явно обозначенным использованием устаревших данных;
 - строгая классификация региона: субъект/город, «Удалённо» или «Регион не определён»;
-- фильтры работодателя и субъекта с AND-семантикой, стабильные сортировки;
+- фильтры работодателя и субъекта с AND-семантикой; фиксированный порядок вакансий — от новых к старым;
 - избранное в формате v2 с автоматической миграцией v1, архивные статусы и PDF;
 - lazy-загрузка описания вакансии и сохранение последней полной выдачи при ошибке обновления.
 
@@ -19,7 +19,7 @@
 
 - Apple silicon, macOS 13.0 или новее;
 - Xcode 15.2 или новее;
-- application token hh.ru, установленный локально по [чек-листу](HH_TOKEN_LOCAL_CHECKLIST.md).
+- встроенный application token hh.ru; правила безопасной проверки описаны в [чек-листе](HH_TOKEN_LOCAL_CHECKLIST.md).
 
 ```zsh
 cd HHVacancySber
@@ -29,6 +29,8 @@ xcodebuild -project HHVacancySber.xcodeproj -scheme HHVacancySber \
   -configuration Debug -destination 'platform=macOS,arch=arm64' test
 ```
 
+Один ограниченный live-тест реального API (не более двух запросов) запускается только явно; команда и ограничения описаны в [документе о тестировании API](docs/HEADHUNTER_API_TESTING.md).
+
 Пользовательское имя приложения — `СберВакансии.app`, bundle ID — `local.sergey.HHVacancySber`. App Sandbox разрешает исходящие сетевые соединения и выбранные пользователем файлы.
 
 ## Конфигурация работодателей
@@ -37,6 +39,6 @@ Bundled-файл находится в `HHVacancySber/HHVacancySber/employers.js
 
 ## Иконка и релиз
 
-Канонический вектор — `HHVacancySber/Design/AppIcon.svg`. Скрипт `HHVacancySber/Scripts/render_icon.py` создаёт слоты 16–1024 через CairoSVG, `rsvg-convert` или Pillow и явно завершается ошибкой, если SVG-backend недоступен.
+Канонический вектор новой зелёной пиктограммы — `HHVacancySber/Design/AppIcon.svg`. Скрипт `HHVacancySber/Scripts/render_icon.py` создаёт слоты 16–1024 через CairoSVG, `rsvg-convert`, macOS AppKit или Pillow и явно завершается ошибкой, если SVG-backend недоступен.
 
 DMG собирается из чистого commit командой `scripts/release.sh --output-dir <directory>`. Скрипт проверяет Release-настройки, sandbox entitlements и итоговый образ.

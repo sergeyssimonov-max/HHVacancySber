@@ -31,7 +31,7 @@ struct VacancyCollectionService: Sendable {
     func collect(
         employers: [EmployerConfigurationEntry],
         areas: AreaDirectoryIndex,
-        progress: @escaping @MainActor (VacancyCollectionProgress) -> Void
+        progress: @escaping @MainActor @Sendable (VacancyCollectionProgress) -> Void
     ) async throws -> [HHVacancySummary] {
         var all: [String: HHVacancySummary] = [:]
         for employer in employers {
@@ -50,7 +50,7 @@ struct VacancyCollectionService: Sendable {
     private func collectEmployer(
         _ employer: EmployerConfigurationEntry,
         areas: AreaDirectoryIndex,
-        progress: @escaping @MainActor (VacancyCollectionProgress) -> Void
+        progress: @escaping @MainActor @Sendable (VacancyCollectionProgress) -> Void
     ) async throws -> [HHVacancySummary] {
         let request = HHVacancySearchRequest(employerID: employer.id)
         let values = try await collectPartition(
@@ -68,7 +68,7 @@ struct VacancyCollectionService: Sendable {
         areaNode: HHAreaNode,
         areas: AreaDirectoryIndex,
         employer: EmployerConfigurationEntry,
-        progress: @escaping @MainActor (VacancyCollectionProgress) -> Void
+        progress: @escaping @MainActor @Sendable (VacancyCollectionProgress) -> Void
     ) async throws -> [String: HHVacancySummary] {
         let expected = try await found(for: request)
         if expected <= Self.maximumAccessibleResults {
@@ -111,7 +111,7 @@ struct VacancyCollectionService: Sendable {
         end: Date,
         expected: Int,
         employer: EmployerConfigurationEntry,
-        progress: @escaping @MainActor (VacancyCollectionProgress) -> Void
+        progress: @escaping @MainActor @Sendable (VacancyCollectionProgress) -> Void
     ) async throws -> [String: HHVacancySummary] {
         let span = end.timeIntervalSince(start)
         guard span > 300 else {
@@ -142,7 +142,7 @@ struct VacancyCollectionService: Sendable {
         _ request: HHVacancySearchRequest,
         expected: Int,
         employer: EmployerConfigurationEntry,
-        progress: @escaping @MainActor (VacancyCollectionProgress) -> Void
+        progress: @escaping @MainActor @Sendable (VacancyCollectionProgress) -> Void
     ) async throws -> [String: HHVacancySummary] {
         let dictionaries = try await client.vacancyDictionaries()
         let dimensions: [(DictionaryDimension, [String])] = [
@@ -166,7 +166,7 @@ struct VacancyCollectionService: Sendable {
         dimensions: [(DictionaryDimension, [String])],
         dimensionIndex: Int,
         employer: EmployerConfigurationEntry,
-        progress: @escaping @MainActor (VacancyCollectionProgress) -> Void
+        progress: @escaping @MainActor @Sendable (VacancyCollectionProgress) -> Void
     ) async throws -> [String: HHVacancySummary] {
         guard dimensionIndex < dimensions.count else {
             throw VacancyCompletenessError(employerID: request.employerID, partition: partitionName(request), expected: expected, actual: 0)
@@ -220,7 +220,7 @@ struct VacancyCollectionService: Sendable {
         _ request: HHVacancySearchRequest,
         expected: Int,
         employer: EmployerConfigurationEntry,
-        progress: @escaping @MainActor (VacancyCollectionProgress) -> Void
+        progress: @escaping @MainActor @Sendable (VacancyCollectionProgress) -> Void
     ) async throws -> [String: HHVacancySummary] {
         guard expected > 0 else { return [:] }
         let pages = Int(ceil(Double(expected) / Double(Self.perPage)))

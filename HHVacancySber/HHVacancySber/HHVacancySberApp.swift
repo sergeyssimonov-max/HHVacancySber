@@ -34,7 +34,8 @@ enum AppComposition {
 private struct UITestEmployerStore: EmployerConfigurationStoring {
     func loadOrCreate() throws -> EmployerConfiguration {
         try EmployerConfiguration(version: 1, employers: [
-            .init(id: "3529", name: "СБЕР", comment: "UI test")
+            .init(id: "3529", name: "СБЕР", comment: "UI test"),
+            .init(id: "2798", name: "СберРешения", comment: "UI test")
         ]).validated()
     }
 }
@@ -78,6 +79,12 @@ private enum UITestFixtures {
             id: "ui-2", name: "Менеджер", employer: .init(name: "СБЕР", id: "3529"), salary: nil,
             area: .init(id: "3", name: "Екатеринбург"), alternateURL: "https://example.invalid/ui-2", url: nil,
             snippet: .init(requirement: nil, responsibility: "Работа с клиентами"), publishedAt: "2026-08-31T10:00:00+0300"
+        ),
+        HHVacancySummary(
+            id: "ui-3", name: "Удалённый разработчик", employer: .init(name: "СберРешения", id: "2798"), salary: nil,
+            area: nil, alternateURL: "https://example.invalid/ui-3", url: nil,
+            snippet: .init(requirement: "Swift", responsibility: "Разработка приложений"),
+            workFormat: [.init(id: "REMOTE", name: "Удалённо")], publishedAt: "2026-08-30T10:00:00+0300"
         )
     ]
     static let details = Dictionary(uniqueKeysWithValues: summaries.map {

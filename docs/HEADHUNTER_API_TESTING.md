@@ -1,33 +1,44 @@
 # HeadHunter API testing
 
-HHVacancySber uses `https://api.hh.ru` as its API base. At runtime, requests use the application access token configured in `HHAuthConfig` through the centralized Bearer authorization and HH-User-Agent request builder. The application does not bootstrap or refresh tokens at runtime.
+HHVacancySber uses `https://api.hh.ru` at runtime. Requests use the application token configured in `HHAuthConfig` through the centralized Bearer authorization and HH-User-Agent request builder. The application does not bootstrap or refresh tokens.
 
-Normal unit and UI tests are offline and must not send production HeadHunter traffic. The single live smoke test is an explicit developer opt-in:
+## Automated tests
 
-```bash
-HH_LIVE_TESTS=1 xcodebuild \
-  -project 'HHVacancySber/HHVacancySber.xcodeproj' \
-  -scheme 'HHVacancySber' \
-  -configuration Debug \
-  -destination 'platform=macOS,arch=arm64' \
-  test \
-  -only-testing:HHVacancySberTests/HHVacancySberTests/testLiveVacancyReadSmoke
+The normal unit and UI suites are deterministic and do not send production traffic: unit tests use injected URL responses, while UI tests launch the DEBUG fixture composition selected by `HHVACANCYSBER_UI_TEST_MODE`.
+
+Run the full local suite from the repository root:
+
+```zsh
+cd HHVacancySber
+xcodebuild -project HHVacancySber.xcodeproj -scheme HHVacancySber \
+  -configuration Debug -destination 'platform=macOS,arch=arm64' test
 ```
 
-The smoke test performs at most two read-only GET requests: one minimal vacancy search (`/vacancies?page=0&per_page=1&area=1`) and, only when the search returns an item, one detail request for that vacancy. It performs no write operations and has a 12-hour cooldown. `HH_LIVE_TESTS_FORCE=1` is available solely as an explicit developer override for the cooldown and does not bypass the two-request or read-only limits.
+CI runs the unit-test target without code signing:
 
-An expanded production UI integration test is also available as an explicit opt-in:
-
-```bash
-HH_LIVE_UI_TESTS=1 xcodebuild \
-  -project 'HHVacancySber/HHVacancySber.xcodeproj' \
-  -scheme 'HHVacancySber' \
-  -configuration Debug \
-  -destination 'platform=macOS,arch=arm64' \
-  test \
-  -only-testing:HHVacancySberUITests/HHVacancySberUITests/testLiveProductionSearchShowsMultipleVacancies
+```zsh
+cd HHVacancySber
+xcodebuild -project HHVacancySber.xcodeproj -scheme HHVacancySber \
+  -configuration Debug -destination 'platform=macOS,arch=arm64' \
+  CODE_SIGNING_ALLOWED=NO test -only-testing:HHVacancySberTests
 ```
 
-This test launches the production app composition, performs the normal configured search plan, waits for at least three real HeadHunter vacancy cards to appear, verifies the completed UI has no error state, and keeps a screenshot in the test result bundle. The production search plan can perform up to 33 read-only vacancy-search GET requests (five pages for each of five role queries and two pages for each of four expansion queries). It does not request vacancy details or perform writes unless a user explicitly interacts with a result card.
+## Limited live test
 
-Production runtime automatic retries are disabled. Responses such as HTTP 429 and 5xx, as well as transport failures, are returned to the caller without automatic retry; the user may repeat the action manually.
+There is exactly one opt-in live API test. It uses the embedded application token, requests one search result, and then retrieves that vacancy's details. The test performs at most two read-only requests, does not log the token, and is skipped unless explicitly enabled:
+
+```zsh
+cd HHVacancySber
+HHVACANCYSBER_RUN_LIVE_API_TEST=1 xcodebuild \
+  -project HHVacancySber.xcodeproj -scheme HHVacancySber \
+  -configuration Debug -destination 'platform=macOS,arch=arm64' \
+  test -only-testing:HHVacancySberTests/HHVacancySberTests/testLiveAPIUsesEmbeddedTokenAndRetrievesOneVacancyWithDetails
+```
+
+Keep live coverage to this single test. It must remain opt-in and bounded to two requests so routine local and CI runs cannot create hh.ru traffic.
+
+## Runtime behavior
+
+Production searches are read-only. Automatic retries are disabled except for the collector's single documented completeness retry when a partition changes while it is being read. HTTP 401, 403, 429, CAPTCHA, server, and transport failures are surfaced to the caller; the user may repeat the refresh manually.
+
+Additional live verification is a manual application run with the configured token. Do not add live traffic to the normal automated suite.

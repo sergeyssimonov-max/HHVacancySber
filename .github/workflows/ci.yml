@@ -15,10 +15,15 @@ jobs:
           legacy_project='HHVacancy''Desk'
           legacy_bundle='local.sergey.HHVacancy''Desk'
           ! grep -R -E "${legacy_project}|${legacy_bundle}" HHVacancySber README.md
-          grep -q 'REPLACE_WITH_YOUR_HH_APPLICATION_TOKEN' HHVacancySber/HHVacancySber/HHAuthConfig.swift
+          auth_config='HHVacancySber/HHVacancySber/HHAuthConfig.swift'
+          grep -Eq 'static let appAccessToken = "[^"]+"' "$auth_config"
+          ! grep -q 'static let appAccessToken = placeholderAccessToken' "$auth_config"
+          ! grep -q 'static let appAccessToken = "REPLACE_WITH_YOUR_HH_APPLICATION_TOKEN"' "$auth_config"
       - name: List project
         working-directory: HHVacancySber
         run: xcodebuild -project HHVacancySber.xcodeproj -list
+      - name: Test release tooling
+        run: /usr/bin/python3 -m unittest discover -s scripts/tests -v
       - name: Build Debug
         working-directory: HHVacancySber
         run: >-

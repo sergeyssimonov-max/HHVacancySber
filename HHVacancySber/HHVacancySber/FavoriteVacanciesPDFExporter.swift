@@ -61,14 +61,6 @@ enum PDFFileNameBuilder {
         )
     }
 
-    static func collision(_ fileName: String, index: Int) -> String {
-        self.fileName(
-            base: fileName,
-            semanticSuffix: String(max(2, index)),
-            fallback: "vacancy"
-        )
-    }
-
     static func sanitize(_ value: String, fallback: String) -> String {
         var result = value.precomposedStringWithCanonicalMapping
         while result.lowercased().hasSuffix(".pdf") {
@@ -187,10 +179,6 @@ enum PDFVisualContentValidator {
 }
 
 enum VacancyPDFFormatter {
-    static func text(for vacancy: VacancySearchResult) -> String {
-        attributedDocument(for: vacancy).string
-    }
-
     static func attributedDocument(for vacancy: VacancySearchResult) -> NSAttributedString {
         let builder = VacancyPDFDocumentBuilder()
         let details = vacancy.details
@@ -885,13 +873,11 @@ enum PDFTransactionDirectoryError: LocalizedError {
 final class PDFTransactionDirectoryLease {
     let identity: PDFFileIdentity
     let originalURL: URL
-    let transactionID: String
     private var descriptor: Int32
 
-    init(identity: PDFFileIdentity, originalURL: URL, transactionID: String, descriptor: Int32) {
+    init(identity: PDFFileIdentity, originalURL: URL, descriptor: Int32) {
         self.identity = identity
         self.originalURL = originalURL
-        self.transactionID = transactionID
         self.descriptor = descriptor
     }
 
@@ -1079,7 +1065,6 @@ final class PDFFileManager: PDFFileManaging, @unchecked Sendable {
                 generation: fileInfo.st_gen
             ),
             originalURL: url,
-            transactionID: transactionID,
             descriptor: descriptor
         )
     }
@@ -1168,7 +1153,6 @@ enum PDFRollbackOperation: String {
     case preservePublishedOutput
     case preserveChangedPublishedOutput
     case restoreOriginal
-    case cleanupTransaction
 }
 
 struct PDFPublishedOutputPreservedError: LocalizedError {
@@ -1239,7 +1223,6 @@ struct PDFTransactionEntry {
     let staged: URL
     let backup: URL
     let authorization: PDFDestinationAuthorization
-    var originalExisted = false
     var originalBackedUp = false
     var outputPublished = false
     var publishedDigest: Data?
@@ -1258,7 +1241,6 @@ struct PDFPublicationTransaction {
     let backupDirectory: URL
     private let fileSystem: any PDFFileManaging
     private(set) var transactionDirectoryCreated = false
-    private(set) var cleanupForbiddenMarkerCreated = false
     private(set) var commitCompleted = false
     private(set) var transactionDirectoryLease: PDFTransactionDirectoryLease?
     private(set) var retainedDirectoryLocation: PDFRetainedDirectoryLocation?
@@ -1308,7 +1290,6 @@ struct PDFPublicationTransaction {
             name: Self.cleanupForbiddenMarkerName,
             contents: Data(transactionID.utf8)
         )
-        cleanupForbiddenMarkerCreated = true
         try fileSystem.createDirectory(at: stagedDirectory, withIntermediateDirectories: false)
         try fileSystem.createDirectory(at: backupDirectory, withIntermediateDirectories: true)
     }
@@ -1329,7 +1310,6 @@ struct PDFPublicationTransaction {
                         destination: entries[index].destination
                     )
                 }
-                entries[index].originalExisted = true
                 try fileSystem.moveItem(at: entries[index].destination, to: entries[index].backup)
                 entries[index].originalBackedUp = true
                 let movedIdentity = try fileSystem.identity(at: entries[index].backup)
@@ -1570,21 +1550,6 @@ actor PDFExportWorker {
     }
 
     func exportPersonal(
-        text: String,
-        destination: URL,
-        didRenderPage: (@Sendable (Int) -> Void)? = nil
-    ) throws {
-        try exportPersonal(
-            document: PDFAttributedDocument(NSAttributedString(
-                string: text,
-                attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.black]
-            )),
-            destination: destination,
-            didRenderPage: didRenderPage
-        )
-    }
-
-    func exportPersonal(
         document: PDFAttributedDocument,
         destination: URL,
         didRenderPage: (@Sendable (Int) -> Void)? = nil
@@ -1820,14 +1785,6 @@ final class FavoriteVacanciesPDFExporter: FavoriteVacanciesPDFExporting {
               }) else {
             throw ExportError.invalidPDF(name)
         }
-    }
-
-    nonisolated static func pages(for text: String) -> [Page] {
-        let attributedText = NSAttributedString(
-            string: text,
-            attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.black]
-        )
-        return pages(for: attributedText)
     }
 
     nonisolated static func pages(for attributedText: NSAttributedString) -> [Page] {

@@ -183,17 +183,40 @@ actor HHRequestGate {
     static let defaultMinimumDelayNanoseconds: UInt64 = 250_000_000
     private let delay: UInt64
     private var lastFinishedAt: UInt64?
+    private var isPerforming = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
 
     init(minimumDelayNanoseconds: UInt64 = defaultMinimumDelayNanoseconds) { delay = minimumDelayNanoseconds }
 
     func perform<T: Sendable>(_ operation: @Sendable () async throws -> T) async throws -> T {
+        await acquire()
+        defer {
+            lastFinishedAt = DispatchTime.now().uptimeNanoseconds
+            release()
+        }
+        try Task.checkCancellation()
         if let lastFinishedAt {
             let now = DispatchTime.now().uptimeNanoseconds
             let elapsed = now > lastFinishedAt ? now - lastFinishedAt : 0
             if elapsed < delay { try await Task.sleep(nanoseconds: delay - elapsed) }
         }
-        defer { lastFinishedAt = DispatchTime.now().uptimeNanoseconds }
         return try await operation()
+    }
+
+    private func acquire() async {
+        guard isPerforming else {
+            isPerforming = true
+            return
+        }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    private func release() {
+        guard !waiters.isEmpty else {
+            isPerforming = false
+            return
+        }
+        waiters.removeFirst().resume()
     }
 }
 

@@ -105,24 +105,32 @@ struct AreaDirectoryStore: @unchecked Sendable {
 
     var fileURL: URL {
         if let configuredFileURL { return configuredFileURL }
-        let base = (try? fileManager.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true))
-            ?? fileManager.temporaryDirectory
-        return base.appendingPathComponent("HHVacancySber", isDirectory: true).appendingPathComponent("areas.json")
+        return ApplicationSupportLocation.fileURL(named: "areas.json", fileManager: fileManager)
     }
 
     func load(using client: any HHVacancyAPIClient) async throws -> AreaDirectorySnapshot {
         let cached = try? readCache()
-        if let cached, now().timeIntervalSince(cached.fetchedAt) >= 0, now().timeIntervalSince(cached.fetchedAt) < ttl {
-            return AreaDirectorySnapshot(index: try AreaDirectoryIndex(root: cached.root), warning: nil)
+        let cachedIndex = cached.flatMap { try? AreaDirectoryIndex(root: $0.root) }
+        if let cached, let cachedIndex,
+           now().timeIntervalSince(cached.fetchedAt) >= 0,
+           now().timeIntervalSince(cached.fetchedAt) < ttl {
+            return AreaDirectorySnapshot(index: cachedIndex, warning: nil)
         }
         do {
             let root = try await client.areaTree()
             let index = try AreaDirectoryIndex(root: root)
-            try write(root: root)
+            do {
+                try write(root: root)
+            } catch {
+                return AreaDirectorySnapshot(
+                    index: index,
+                    warning: "Не удалось сохранить кэш регионов: \(error.localizedDescription)"
+                )
+            }
             return AreaDirectorySnapshot(index: index, warning: nil)
         } catch {
-            if let cached {
-                return AreaDirectorySnapshot(index: try AreaDirectoryIndex(root: cached.root), warning: "Используется устаревший кэш регионов: \(error.localizedDescription)")
+            if let cachedIndex {
+                return AreaDirectorySnapshot(index: cachedIndex, warning: "Используется устаревший кэш регионов: \(error.localizedDescription)")
             }
             throw AreaDirectoryError.unavailable
         }

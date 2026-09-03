@@ -64,9 +64,7 @@ struct EmployerConfigurationStore: EmployerConfigurationStoring, @unchecked Send
 
     var fileURL: URL {
         if let configuredFileURL { return configuredFileURL }
-        let base = (try? fileManager.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true))
-            ?? fileManager.temporaryDirectory
-        return base.appendingPathComponent("HHVacancySber", isDirectory: true).appendingPathComponent("employers.json")
+        return ApplicationSupportLocation.fileURL(named: "employers.json", fileManager: fileManager)
     }
 
     func loadOrCreate() throws -> EmployerConfiguration {

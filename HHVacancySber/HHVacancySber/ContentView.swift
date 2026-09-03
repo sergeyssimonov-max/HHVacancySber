@@ -1,7 +1,7 @@
 import SwiftUI
 
 enum WindowLayoutPolicy {
-    static let minimumSize = CGSize(width: 760, height: 560)
+    static let minimumSize = CGSize(width: 900, height: 560)
     static let defaultSize = CGSize(width: 960, height: 680)
 }
 
