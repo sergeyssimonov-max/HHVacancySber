@@ -70,9 +70,16 @@ struct VacancyCollectionService: Sendable {
         employer: EmployerConfigurationEntry,
         progress: @escaping @MainActor @Sendable (VacancyCollectionProgress) -> Void
     ) async throws -> [String: HHVacancySummary] {
-        let expected = try await found(for: request)
+        let initialResponse = try await probe(for: request)
+        let expected = initialResponse.found
         if expected <= Self.maximumAccessibleResults {
-            return try await fetchLeaf(request, expected: expected, employer: employer, progress: progress)
+            return try await fetchLeaf(
+                request,
+                expected: expected,
+                initialResponse: initialResponse,
+                employer: employer,
+                progress: progress
+            )
         }
 
         let children = areas.children(of: areaNode.id)
@@ -122,9 +129,16 @@ struct VacancyCollectionService: Sendable {
         var combined: [String: HHVacancySummary] = [:]
         for (lower, upper) in [(start, midpoint), (secondStart, end)] where lower <= upper {
             let child = replacing(request, dateFrom: lower, dateTo: upper)
-            let count = try await found(for: child)
+            let initialResponse = try await probe(for: child)
+            let count = initialResponse.found
             let values = count <= Self.maximumAccessibleResults
-                ? try await fetchLeaf(child, expected: count, employer: employer, progress: progress)
+                ? try await fetchLeaf(
+                    child,
+                    expected: count,
+                    initialResponse: initialResponse,
+                    employer: employer,
+                    progress: progress
+                )
                 : try await collectByDate(child, start: lower, end: upper, expected: count, employer: employer, progress: progress)
             combined.merge(values) { current, _ in current }
         }
@@ -175,9 +189,16 @@ struct VacancyCollectionService: Sendable {
         var combined: [String: HHVacancySummary] = [:]
         for value in values {
             let child = replacing(request, dimension: dimension, value: value)
-            let count = try await found(for: child)
+            let initialResponse = try await probe(for: child)
+            let count = initialResponse.found
             let values = count <= Self.maximumAccessibleResults
-                ? try await fetchLeaf(child, expected: count, employer: employer, progress: progress)
+                ? try await fetchLeaf(
+                    child,
+                    expected: count,
+                    initialResponse: initialResponse,
+                    employer: employer,
+                    progress: progress
+                )
                 : try await collectByDictionaryDimension(
                     child,
                     expected: count,
@@ -212,20 +233,35 @@ struct VacancyCollectionService: Sendable {
         )
     }
 
-    private func found(for request: HHVacancySearchRequest) async throws -> Int {
-        try await client.searchVacancies(replacing(request, page: 0, perPage: 1)).found
+    private func probe(for request: HHVacancySearchRequest) async throws -> HHVacancySearchResponse {
+        try await client.searchVacancies(replacing(request, page: 0, perPage: Self.perPage))
     }
 
     private func fetchLeaf(
         _ request: HHVacancySearchRequest,
         expected: Int,
+        initialResponse: HHVacancySearchResponse,
         employer: EmployerConfigurationEntry,
         progress: @escaping @MainActor @Sendable (VacancyCollectionProgress) -> Void
     ) async throws -> [String: HHVacancySummary] {
         guard expected > 0 else { return [:] }
         let pages = Int(ceil(Double(expected) / Double(Self.perPage)))
         var result: [String: HHVacancySummary] = [:]
-        for page in 0..<pages {
+        guard initialResponse.found == expected else {
+            throw VacancyCompletenessError(
+                employerID: request.employerID,
+                partition: partitionName(request),
+                expected: expected,
+                actual: initialResponse.found
+            )
+        }
+        for item in initialResponse.items { result[item.id] = item }
+        await progress(.init(
+            employerName: employer.name,
+            loadedCount: result.count,
+            partition: partitionName(request)
+        ))
+        for page in 1..<pages {
             try Task.checkCancellation()
             let response = try await client.searchVacancies(replacing(request, page: page, perPage: Self.perPage))
             guard response.found == expected else {

@@ -43,6 +43,21 @@ enum VacancyPDFDefaults {
 enum PDFFileNameBuilder {
     static let maximumUTF8Length = 240
 
+    static func statisticsReport(_ report: VacancyStatisticsReport) -> String {
+        // Keep both filter labels readable, even when one is exceptionally long.
+        let labels = [report.modeName, report.employerName, report.regionName].map {
+            prefixFittingUTF8Budget(sanitize($0, fallback: "all"), budget: 48)
+        }.joined(separator: "_")
+        let configuration = [report.modeName, report.employerID, report.regionID].joined(separator: "\n")
+        let digest = SHA256.hash(data: Data(configuration.utf8)).prefix(4)
+            .map { String(format: "%02x", $0) }.joined()
+        return fileName(
+            base: "\(timestamp(report.createdAt))_статистика_\(labels)",
+            semanticSuffix: digest,
+            fallback: "статистика_вакансий"
+        )
+    }
+
     static func personal(vacancyID: String, title: String, exportStartedAt: Date) -> String {
         let safeTitle = sanitize(title, fallback: "без названия")
         return fileName(
@@ -192,7 +207,7 @@ enum VacancyPDFFormatter {
 
         builder.section("Основная информация")
         builder.field("Работодатель", vacancy.employerName)
-        if let department = details.department?.name?.nilIfBlank {
+        if let department = vacancy.departmentName {
             builder.field("Подразделение", department)
         }
         builder.field("Регион", vacancy.areaName)
@@ -202,7 +217,7 @@ enum VacancyPDFFormatter {
             builder.field("Приём откликов", closed ? "Закрыт" : "Открыт")
         }
         builder.field("Идентификатор вакансии", vacancy.id)
-        builder.field("Дата публикации", details.publishedAt?.nilIfBlank)
+        builder.field("Дата публикации", details.publishedAt?.nilIfBlank ?? vacancy.publishedAt?.nilIfBlank)
         if details.initialCreatedAt?.nilIfBlank != details.publishedAt?.nilIfBlank {
             builder.field("Первоначально создана", details.initialCreatedAt?.nilIfBlank)
         }
@@ -210,7 +225,7 @@ enum VacancyPDFFormatter {
         builder.field("Дата архивации", details.archivedAt?.nilIfBlank)
         builder.linkField("Исходная ссылка HH.ru", vacancy.alternateURL)
 
-        appendSalary(details: details, fallbackText: vacancy.persistedSalaryText, to: builder)
+        appendSalary(details: details, fallbackText: vacancy.salaryText, to: builder)
         appendEmployment(details, to: builder)
         appendDescription(vacancy, to: builder)
 
@@ -419,14 +434,121 @@ enum VacancyPDFFormatter {
     }
 }
 
+struct VacancyStatisticsReport: Sendable {
+    struct Entry: Sendable {
+        let id: String
+        let name: String
+        let publishedAt: String?
+        let employerID: String
+        let employerName: String
+        let regionID: String
+        let regionName: String
+        let isArchived: Bool
+        let hasSalary: Bool
+
+        init(_ vacancy: VacancySearchResult) {
+            id = vacancy.id
+            name = vacancy.name
+            publishedAt = vacancy.publishedAt
+            employerID = vacancy.employerID ?? "unknown:\(vacancy.employerName)"
+            employerName = vacancy.employerName
+            regionID = vacancy.location.filterID
+            regionName = vacancy.location.subjectName ?? vacancy.areaName
+            isArchived = vacancy.isArchived
+            hasSalary = vacancy.salaryText?.nilIfBlank != nil
+        }
+    }
+
+    let entries: [Entry]
+    let modeName: String
+    let employerID: String
+    let employerName: String
+    let regionID: String
+    let regionName: String
+    let createdAt: Date
+    let timeZoneIdentifier: String
+    let sourceNote: String
+
+    var fileName: String { PDFFileNameBuilder.statisticsReport(self) }
+
+    func orderedEntries() -> [(entry: Entry, date: Date?)] {
+        let parser = HHPublicationDateParser()
+        return entries.map { entry in
+            (entry: entry, date: parser.date(from: entry.publishedAt))
+        }.sorted { left, right in
+            switch (left.date, right.date) {
+            case let (lhs?, rhs?) where lhs != rhs: return lhs > rhs
+            case (_?, nil): return true
+            case (nil, _?): return false
+            default: return left.entry.id < right.entry.id
+            }
+        }
+    }
+
+    func attributedDocument() throws -> NSAttributedString {
+        let builder = VacancyPDFDocumentBuilder()
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "ru_RU")
+        formatter.timeZone = TimeZone(identifier: timeZoneIdentifier) ?? TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "dd.MM.yyyy HH:mm"
+        let ordered = orderedEntries()
+        let dated = ordered.compactMap(\.date)
+        let employers = Dictionary(grouping: entries, by: \.employerID)
+        let regions = Dictionary(grouping: entries, by: \.regionID)
+        let archived = entries.filter(\.isArchived).count
+        let salaried = entries.filter(\.hasSalary).count
+
+        builder.banner("ВАКАНСИИ HEADHUNTER")
+        builder.title("Статистический отчёт")
+        builder.provenance("Сформирован \(formatter.string(from: createdAt)); часовой пояс: \(timeZoneIdentifier)")
+        builder.section("Конфигурация фильтров")
+        builder.field("Список", modeName)
+        builder.field("Работодатель", employerName)
+        builder.field("Регион", regionName)
+        builder.plain(sourceNote)
+        builder.section("Общая статистика")
+        builder.field("Всего вакансий", String(entries.count))
+        builder.field("Работодателей", String(employers.count))
+        builder.field("Регионов / территориальных групп", String(regions.count))
+        builder.field("Активных по локальным данным", String(entries.count - archived))
+        builder.field("В архиве", String(archived))
+        builder.field("С указанной зарплатой", String(salaried))
+        builder.field("Без указанной зарплаты", String(entries.count - salaried))
+        if let newest = dated.first, let oldest = dated.last {
+            builder.field("Период размещения", "\(formatter.string(from: oldest)) - \(formatter.string(from: newest))")
+        }
+        builder.field("Без корректной даты размещения", String(entries.count - dated.count))
+        builder.section("По работодателям")
+        for key in employers.keys.sorted() {
+            try Task.checkCancellation()
+            guard let values = employers[key], let first = values.first else { continue }
+            builder.field(first.employerName, String(values.count))
+        }
+        builder.section("По регионам")
+        for key in regions.keys.sorted() {
+            try Task.checkCancellation()
+            guard let values = regions[key], let first = values.first else { continue }
+            builder.field(first.regionName, String(values.count))
+        }
+        builder.section("Вакансии: от новых к старым")
+        if ordered.isEmpty { builder.plain("Под выбранными фильтрами вакансий нет.") }
+        for (index, row) in ordered.enumerated() {
+            try Task.checkCancellation()
+            let date = row.date.map { formatter.string(from: $0) } ?? "Дата размещения не указана"
+            builder.field("\(index + 1). \(row.entry.name)", date)
+        }
+        return builder.document
+    }
+}
+
 private final class VacancyPDFDocumentBuilder {
     private(set) var document = NSMutableAttributedString()
 
-    private static let bodyFont = NSFont.systemFont(ofSize: 9.5)
-    private static let labelFont = NSFont.systemFont(ofSize: 11.5, weight: .semibold)
-    private static let headingFont = NSFont.systemFont(ofSize: 15, weight: .bold)
-    private static let titleFont = NSFont.systemFont(ofSize: 20, weight: .bold)
-    private static let bannerFont = NSFont.systemFont(ofSize: 9.5, weight: .semibold)
+    private static let bodyFont = NSFont.systemFont(ofSize: 7.5)
+    private static let labelFont = NSFont.systemFont(ofSize: 9.5, weight: .semibold)
+    private static let headingFont = NSFont.systemFont(ofSize: 13, weight: .bold)
+    private static let titleFont = NSFont.systemFont(ofSize: 18, weight: .bold)
+    private static let bannerFont = NSFont.systemFont(ofSize: 7.5, weight: .semibold)
 
     func banner(_ text: String) {
         append(text.uppercased() + "\n", attributes: [
@@ -443,7 +565,7 @@ private final class VacancyPDFDocumentBuilder {
 
     func provenance(_ text: String) {
         append(text + "\n", attributes: [
-            .font: NSFont.systemFont(ofSize: 10.5),
+            .font: NSFont.systemFont(ofSize: 8.5),
             .foregroundColor: NSColor(calibratedWhite: 0.3, alpha: 1)
         ])
     }
@@ -451,7 +573,7 @@ private final class VacancyPDFDocumentBuilder {
     func notice(_ text: String) {
         let style = paragraphStyle(lineSpacing: 1.5, paragraphSpacing: 8, headIndent: 10, firstLineHeadIndent: 10)
         append(text + "\n", attributes: [
-            .font: NSFont.systemFont(ofSize: 10.5, weight: .medium),
+            .font: NSFont.systemFont(ofSize: 8.5, weight: .medium),
             .foregroundColor: NSColor(calibratedWhite: 0.2, alpha: 1),
             .backgroundColor: NSColor(calibratedWhite: 0.94, alpha: 1),
             .paragraphStyle: style
@@ -557,6 +679,33 @@ private final class VacancyPDFDocumentBuilder {
 }
 
 enum VacancyHTMLAttributedText {
+    private static let commentExpression = expression(#"<!--[\s\S]*?-->"#)
+    private static let blockedElementExpression = expression(
+        #"<(script|style|noscript|iframe|object|embed|svg|canvas|form|button|video|audio|picture)\b[^>]*>[\s\S]*?</\1\s*>"#,
+        options: [.caseInsensitive]
+    )
+    private static let unterminatedBlockedElementExpression = expression(
+        #"<(script|style|noscript|iframe|object|embed|svg|canvas|form|button|video|audio|picture)\b[^>]*>[\s\S]*$"#,
+        options: [.caseInsensitive]
+    )
+    private static let externalElementExpression = expression(
+        #"<(img|input|source|link|meta)\b[^>]*>"#,
+        options: [.caseInsensitive]
+    )
+    private static let supportedElementExpression = expression(
+        #"<(p|div|br|ul|ol|li|h[1-6]|strong|b|em|i|blockquote|pre|code|hr)\b[^>]*>"#,
+        options: [.caseInsensitive]
+    )
+    private static let unsupportedElementExpression = expression(
+        #"<(?!/?(?:p|div|br|ul|ol|li|h[1-6]|strong|b|em|i|blockquote|pre|code|hr|a)\b)[^>]+>"#,
+        options: [.caseInsensitive]
+    )
+    private static let anchorExpression = expression(#"<a\b[^>]*>"#, options: [.caseInsensitive])
+    private static let anchorHREFExpression = expression(
+        #"href\s*=\s*([\"'])(.*?)\1"#,
+        options: [.caseInsensitive]
+    )
+
     static func convert(_ html: String) -> NSAttributedString {
         let sanitized = sanitize(html)
         let wrapped = """
@@ -571,7 +720,7 @@ enum VacancyHTMLAttributedText {
               ) else {
             return NSAttributedString(
                 string: html.readableHTMLText,
-                attributes: [.font: NSFont.systemFont(ofSize: 9.5), .foregroundColor: NSColor.black]
+                attributes: [.font: NSFont.systemFont(ofSize: 7.5), .foregroundColor: NSColor.black]
             )
         }
 
@@ -579,7 +728,7 @@ enum VacancyHTMLAttributedText {
         imported.addAttribute(.foregroundColor, value: NSColor.black, range: fullRange)
         imported.enumerateAttribute(.font, in: fullRange) { value, range, _ in
             let source = value as? NSFont ?? NSFont.systemFont(ofSize: 11.5)
-            let size = min(max(source.pointSize, 10.5), 19) - 2
+            let size = min(max(source.pointSize, 10.5), 19) - 4
             var traits = source.fontDescriptor.symbolicTraits
             traits.remove(.monoSpace)
             let descriptor = NSFont.systemFont(ofSize: size).fontDescriptor.withSymbolicTraits(traits)
@@ -667,53 +816,39 @@ enum VacancyHTMLAttributedText {
 
     static func sanitize(_ html: String) -> String {
         var value = html
+        value = replacing(commentExpression, in: value, with: "")
         value = replacing(
-            #"<!--[\s\S]*?-->"#,
+            blockedElementExpression,
             in: value,
             with: ""
         )
         value = replacing(
-            #"<(script|style|noscript|iframe|object|embed|svg|canvas|form|button|video|audio|picture)\b[^>]*>[\s\S]*?</\1\s*>"#,
+            unterminatedBlockedElementExpression,
             in: value,
-            with: "",
-            options: [.caseInsensitive]
+            with: ""
         )
-        value = replacing(
-            #"<(script|style|noscript|iframe|object|embed|svg|canvas|form|button|video|audio|picture)\b[^>]*>[\s\S]*$"#,
-            in: value,
-            with: "",
-            options: [.caseInsensitive]
-        )
-        value = replacing(#"<(img|input|source|link|meta)\b[^>]*>"#, in: value, with: "", options: [.caseInsensitive])
+        value = replacing(externalElementExpression, in: value, with: "")
         value = sanitizeAnchors(in: value)
         value = replacing(
-            #"<(p|div|br|ul|ol|li|h[1-6]|strong|b|em|i|blockquote|pre|code|hr)\b[^>]*>"#,
+            supportedElementExpression,
             in: value,
-            with: "<$1>",
-            options: [.caseInsensitive]
+            with: "<$1>"
         )
         value = replacing(
-            #"<(?!/?(?:p|div|br|ul|ol|li|h[1-6]|strong|b|em|i|blockquote|pre|code|hr|a)\b)[^>]+>"#,
+            unsupportedElementExpression,
             in: value,
-            with: "",
-            options: [.caseInsensitive]
+            with: ""
         )
         return value
     }
 
     private static func sanitizeAnchors(in source: String) -> String {
-        guard let expression = try? NSRegularExpression(pattern: #"<a\b[^>]*>"#, options: [.caseInsensitive]) else {
-            return source
-        }
+        guard let expression = anchorExpression else { return source }
         let mutable = NSMutableString(string: source)
         let matches = expression.matches(in: source, range: NSRange(source.startIndex..., in: source))
         for match in matches.reversed() {
             let tag = mutable.substring(with: match.range)
-            let href = firstCapture(
-                pattern: #"href\s*=\s*([\"'])(.*?)\1"#,
-                in: tag,
-                group: 2
-            )
+            let href = firstCapture(expression: anchorHREFExpression, in: tag, group: 2)
             let replacement: String
             if let href,
                let url = URL(string: href),
@@ -729,8 +864,12 @@ enum VacancyHTMLAttributedText {
         return mutable as String
     }
 
-    private static func firstCapture(pattern: String, in source: String, group: Int) -> String? {
-        guard let expression = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+    private static func firstCapture(
+        expression: NSRegularExpression?,
+        in source: String,
+        group: Int
+    ) -> String? {
+        guard let expression,
               let match = expression.firstMatch(in: source, range: NSRange(source.startIndex..., in: source)),
               match.numberOfRanges > group,
               let range = Range(match.range(at: group), in: source) else { return nil }
@@ -738,17 +877,23 @@ enum VacancyHTMLAttributedText {
     }
 
     private static func replacing(
-        _ pattern: String,
+        _ expression: NSRegularExpression?,
         in source: String,
-        with replacement: String,
-        options: NSRegularExpression.Options = []
+        with replacement: String
     ) -> String {
-        guard let expression = try? NSRegularExpression(pattern: pattern, options: options) else { return source }
+        guard let expression else { return source }
         return expression.stringByReplacingMatches(
             in: source,
             range: NSRange(source.startIndex..., in: source),
             withTemplate: replacement
         )
+    }
+
+    private static func expression(
+        _ pattern: String,
+        options: NSRegularExpression.Options = []
+    ) -> NSRegularExpression? {
+        try? NSRegularExpression(pattern: pattern, options: options)
     }
 }
 
@@ -757,12 +902,12 @@ struct FavoritePDFExportProgress: Equatable {
     let totalVacancies: Int
 }
 
-struct PDFAttributedDocument: @unchecked Sendable {
-    let value: NSAttributedString
+struct PDFVacancySnapshot: @unchecked Sendable {
+    let value: VacancySearchResult
+}
 
-    init(_ value: NSAttributedString) {
-        self.value = value.copy() as? NSAttributedString ?? value
-    }
+struct PDFVacanciesSnapshot: @unchecked Sendable {
+    let values: [VacancySearchResult]
 }
 
 enum FavoritePDFExportOutcome: Equatable {
@@ -1503,7 +1648,12 @@ actor PDFExportWorker {
     private let beforePublishingPart: @Sendable (Int) throws -> Void
     private let validateStagedPart: @Sendable (URL, Int) throws -> Void
     private let beforeFinalizingTransaction: @Sendable (URL, Bool) throws -> Void
-    private var preparedParts: [[FavoriteVacanciesPDFExporter.Page]]?
+    private struct PreparedPart: Sendable {
+        let data: Data
+        let pageCount: Int
+    }
+
+    private var preparedParts: [PreparedPart]?
 
     struct PreparedExport: Sendable {
         let partCount: Int
@@ -1530,12 +1680,60 @@ actor PDFExportWorker {
     }
 
     func prepare(
-        documents: [FavoriteVacanciesPDFExporter.VacancyPages]
-    ) throws -> PreparedExport {
+        vacancies: PDFVacanciesSnapshot,
+        progress: @escaping @MainActor @Sendable (FavoritePDFExportProgress) -> Void
+    ) async throws -> PreparedExport {
+        preparedParts = nil
         try Task.checkCancellation()
-        let parts = FavoriteVacanciesPDFExporter.parts(for: documents)
+        var parts: [PreparedPart] = []
+        var currentPages: [FavoriteVacanciesPDFExporter.Page] = []
+        currentPages.reserveCapacity(FavoriteVacanciesPDFExporter.maximumPagesPerFile)
+        var totalPages = 0
+
+        for (index, vacancy) in vacancies.values.enumerated() {
+            try Task.checkCancellation()
+            let pages = autoreleasepool {
+                let attributed = VacancyPDFFormatter.attributedDocument(for: vacancy)
+                return FavoriteVacanciesPDFExporter.pages(for: attributed)
+            }
+            if !currentPages.isEmpty,
+               currentPages.count + pages.count > FavoriteVacanciesPDFExporter.maximumPagesPerFile {
+                parts.append(try preparedPart(for: currentPages))
+                totalPages += currentPages.count
+                currentPages.removeAll(keepingCapacity: true)
+            }
+            if pages.count > FavoriteVacanciesPDFExporter.maximumPagesPerFile {
+                parts.append(try preparedPart(for: pages))
+                totalPages += pages.count
+            } else {
+                currentPages.append(contentsOf: pages)
+            }
+            await progress(.init(completedVacancies: index + 1, totalVacancies: vacancies.values.count))
+        }
+        if !currentPages.isEmpty {
+            parts.append(try preparedPart(for: currentPages))
+            totalPages += currentPages.count
+        }
         preparedParts = parts
-        return PreparedExport(partCount: parts.count, pageCount: parts.reduce(0) { $0 + $1.count })
+        return PreparedExport(
+            partCount: parts.count,
+            pageCount: totalPages
+        )
+    }
+
+    func discardPreparedExport() {
+        preparedParts = nil
+    }
+
+    private func preparedPart(
+        for pages: [FavoriteVacanciesPDFExporter.Page]
+    ) throws -> PreparedPart {
+        try Task.checkCancellation()
+        let data = try autoreleasepool {
+            try FavoriteVacanciesPDFExporter.pdfData(for: pages)
+        }
+        try FavoriteVacanciesPDFExporter.validatePDF(data: data, expectedPages: pages.count)
+        return PreparedPart(data: data, pageCount: pages.count)
     }
 
     func collisionPlan(names: [String], directory: URL) throws -> PDFCollisionPlan {
@@ -1550,15 +1748,30 @@ actor PDFExportWorker {
     }
 
     func exportPersonal(
-        document: PDFAttributedDocument,
+        vacancy: PDFVacancySnapshot,
         destination: URL,
         didRenderPage: (@Sendable (Int) -> Void)? = nil
     ) throws {
         try Task.checkCancellation()
-        let pages = FavoriteVacanciesPDFExporter.pages(for: document.value)
+        let pages = autoreleasepool {
+            let attributed = VacancyPDFFormatter.attributedDocument(for: vacancy.value)
+            return FavoriteVacanciesPDFExporter.pages(for: attributed)
+        }
         try Task.checkCancellation()
         let data = try FavoriteVacanciesPDFExporter.pdfData(for: pages, didRenderPage: didRenderPage)
         try FavoriteVacanciesPDFExporter.validatePDF(data: data, expectedPages: pages.count)
+        try Task.checkCancellation()
+        try data.write(to: destination, options: .atomic)
+    }
+
+    func exportStatistics(report: VacancyStatisticsReport, destination: URL) throws {
+        try Task.checkCancellation()
+        let pages = try autoreleasepool {
+            try FavoriteVacanciesPDFExporter.pages(for: report.attributedDocument())
+        }
+        let data = try FavoriteVacanciesPDFExporter.pdfData(for: pages)
+        try FavoriteVacanciesPDFExporter.validatePDF(data: data, expectedPages: pages.count)
+        try Task.checkCancellation()
         try data.write(to: destination, options: .atomic)
     }
 
@@ -1585,8 +1798,8 @@ actor PDFExportWorker {
             for (index, part) in parts.enumerated() {
                 try Task.checkCancellation()
                 let url = transaction.entries[index].staged
-                try FavoriteVacanciesPDFExporter.pdfData(for: part).write(to: url, options: .atomic)
-                try validateStagedPart(url, part.count)
+                try part.data.write(to: url, options: .atomic)
+                try validateStagedPart(url, part.pageCount)
             }
             try Task.checkCancellation()
             try transaction.backupOriginals()
@@ -1620,10 +1833,6 @@ final class FavoriteVacanciesPDFExporter: FavoriteVacanciesPDFExporting {
 
     struct Page: @unchecked Sendable {
         let content: NSAttributedString
-    }
-
-    struct VacancyPages: Sendable {
-        let pages: [Page]
     }
 
     enum ExportError: LocalizedError {
@@ -1672,33 +1881,40 @@ final class FavoriteVacanciesPDFExporter: FavoriteVacanciesPDFExporting {
         progress: @escaping @MainActor @Sendable (FavoritePDFExportProgress) -> Void
     ) async throws -> FavoritePDFExportOutcome {
         let exportStartedAt = now()
-        var documents: [VacancyPages] = []
-        for (index, vacancy) in vacancies.enumerated() {
-            try Task.checkCancellation()
-            let attributedDocument = VacancyPDFFormatter.attributedDocument(for: vacancy)
-            documents.append(.init(pages: Self.pages(for: attributedDocument)))
-            progress(.init(completedVacancies: index + 1, totalVacancies: vacancies.count))
-        }
-        let prepared = try await worker.prepare(documents: documents)
-        guard let directory = chooseDirectory() else { return .cancelled }
+        do {
+            let prepared = try await worker.prepare(
+                vacancies: PDFVacanciesSnapshot(values: vacancies),
+                progress: progress
+            )
+            guard let directory = chooseDirectory() else {
+                await worker.discardPreparedExport()
+                return .cancelled
+            }
 
-        let names = (0..<prepared.partCount).map {
-            Self.fileName(part: $0 + 1, totalParts: prepared.partCount, exportStartedAt: exportStartedAt)
-        }
-        let collisionPlan = try await worker.collisionPlan(names: names, directory: directory)
-        guard collisionPlan.collidingNames.isEmpty
-                || confirmReplacement(collisionPlan.collidingNames) else { return .cancelled }
+            let names = (0..<prepared.partCount).map {
+                Self.fileName(part: $0 + 1, totalParts: prepared.partCount, exportStartedAt: exportStartedAt)
+            }
+            let collisionPlan = try await worker.collisionPlan(names: names, directory: directory)
+            guard collisionPlan.collidingNames.isEmpty
+                    || confirmReplacement(collisionPlan.collidingNames) else {
+                await worker.discardPreparedExport()
+                return .cancelled
+            }
 
-        let publication = try await worker.publish(
-            names: names,
-            directory: directory,
-            authorizations: collisionPlan.authorizations
-        )
-        return .exportedWithCleanupWarning(
-            fileCount: publication.destinations.count,
-            pageCount: prepared.pageCount,
-            directory: publication.cleanupWarningDirectory
-        )
+            let publication = try await worker.publish(
+                names: names,
+                directory: directory,
+                authorizations: collisionPlan.authorizations
+            )
+            return .exportedWithCleanupWarning(
+                fileCount: publication.destinations.count,
+                pageCount: prepared.pageCount,
+                directory: publication.cleanupWarningDirectory
+            )
+        } catch {
+            await worker.discardPreparedExport()
+            throw error
+        }
     }
 
     static func configureDirectoryPanel(_ panel: NSOpenPanel) {
@@ -1713,26 +1929,6 @@ final class FavoriteVacanciesPDFExporter: FavoriteVacanciesPDFExporting {
         let panel = NSOpenPanel()
         configureDirectoryPanel(panel)
         return panel.runModal() == .OK ? panel.url : nil
-    }
-
-    nonisolated static func parts(for documents: [VacancyPages], maximumPages: Int = maximumPagesPerFile) -> [[Page]] {
-        guard maximumPages > 0 else { return [] }
-        var parts: [[Page]] = []
-        var current: [Page] = []
-
-        for document in documents where !document.pages.isEmpty {
-            if !current.isEmpty && current.count + document.pages.count > maximumPages {
-                parts.append(current)
-                current = []
-            }
-            if document.pages.count > maximumPages {
-                parts.append(document.pages)
-            } else {
-                current.append(contentsOf: document.pages)
-            }
-        }
-        if !current.isEmpty { parts.append(current) }
-        return parts
     }
 
     nonisolated static func fileName(
@@ -1796,42 +1992,48 @@ final class FavoriteVacanciesPDFExporter: FavoriteVacanciesPDFExporting {
         var result: [Page] = []
         var consumedCharacters = 0
         while consumedCharacters < attributedText.length {
-            let remainingRange = NSRange(
-                location: consumedCharacters,
-                length: attributedText.length - consumedCharacters
-            )
-            let remainingText = attributedText.attributedSubstring(from: remainingRange)
-            let textStorage = NSTextStorage(attributedString: remainingText)
-            let layoutManager = NSLayoutManager()
-            textStorage.addLayoutManager(layoutManager)
-            let container = NSTextContainer(size: contentSize)
-            container.lineFragmentPadding = 0
-            layoutManager.addTextContainer(container)
-            layoutManager.ensureLayout(for: container)
-            let glyphRange = layoutManager.glyphRange(for: container)
-            guard glyphRange.length > 0 else { break }
-            var characterRange = layoutManager.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
-            guard characterRange.length > 0 else { break }
-
-            let visibleEnd = NSMaxRange(characterRange)
-            if visibleEnd < remainingText.length, visibleEnd > 0 {
-                let source = remainingText.string as NSString
-                var paragraphStart = 0
-                var paragraphEnd = 0
-                var contentsEnd = 0
-                source.getParagraphStart(
-                    &paragraphStart,
-                    end: &paragraphEnd,
-                    contentsEnd: &contentsEnd,
-                    for: NSRange(location: visibleEnd - 1, length: 0)
+            let next: (page: Page, consumed: Int)? = autoreleasepool {
+                let remainingRange = NSRange(
+                    location: consumedCharacters,
+                    length: attributedText.length - consumedCharacters
                 )
-                if paragraphStart > characterRange.location, paragraphEnd > visibleEnd {
-                    characterRange.length = paragraphStart - characterRange.location
-                }
-            }
+                let remainingText = attributedText.attributedSubstring(from: remainingRange)
+                let textStorage = NSTextStorage(attributedString: remainingText)
+                let layoutManager = NSLayoutManager()
+                textStorage.addLayoutManager(layoutManager)
+                let container = NSTextContainer(size: contentSize)
+                container.lineFragmentPadding = 0
+                layoutManager.addTextContainer(container)
+                layoutManager.ensureLayout(for: container)
+                let glyphRange = layoutManager.glyphRange(for: container)
+                guard glyphRange.length > 0 else { return nil }
+                var characterRange = layoutManager.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
+                guard characterRange.length > 0 else { return nil }
 
-            result.append(Page(content: remainingText.attributedSubstring(from: characterRange)))
-            consumedCharacters += NSMaxRange(characterRange)
+                let visibleEnd = NSMaxRange(characterRange)
+                if visibleEnd < remainingText.length, visibleEnd > 0 {
+                    let source = remainingText.string as NSString
+                    var paragraphStart = 0
+                    var paragraphEnd = 0
+                    var contentsEnd = 0
+                    source.getParagraphStart(
+                        &paragraphStart,
+                        end: &paragraphEnd,
+                        contentsEnd: &contentsEnd,
+                        for: NSRange(location: visibleEnd - 1, length: 0)
+                    )
+                    if paragraphStart > characterRange.location, paragraphEnd > visibleEnd {
+                        characterRange.length = paragraphStart - characterRange.location
+                    }
+                }
+                return (
+                    Page(content: remainingText.attributedSubstring(from: characterRange)),
+                    NSMaxRange(characterRange)
+                )
+            }
+            guard let next else { break }
+            result.append(next.page)
+            consumedCharacters += next.consumed
         }
         return result.isEmpty ? [Page(content: attributedText)] : result
     }
@@ -1847,6 +2049,7 @@ final class FavoriteVacanciesPDFExporter: FavoriteVacanciesPDFExporting {
             throw ExportError.cannotCreatePDF
         }
         for (index, page) in pages.enumerated() {
+            try Task.checkCancellation()
             context.beginPDFPage(nil)
             context.saveGState()
             context.setFillColor(NSColor.white.cgColor)

@@ -118,6 +118,7 @@ struct AreaDirectoryStore: @unchecked Sendable {
         }
         do {
             let root = try await client.areaTree()
+            try Task.checkCancellation()
             let index = try AreaDirectoryIndex(root: root)
             do {
                 try write(root: root)
@@ -128,6 +129,8 @@ struct AreaDirectoryStore: @unchecked Sendable {
                 )
             }
             return AreaDirectorySnapshot(index: index, warning: nil)
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             if let cachedIndex {
                 return AreaDirectorySnapshot(index: cachedIndex, warning: "Используется устаревший кэш регионов: \(error.localizedDescription)")

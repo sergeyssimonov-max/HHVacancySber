@@ -23,7 +23,7 @@ private struct VacancySearchCache {
 final class VacancySearchViewModel: ObservableObject {
     static let searchCacheTTL: TimeInterval = 10 * 60
     static let archiveCheckInterval: TimeInterval = 30 * 60
-    private static let publicationDateFormatter = ISO8601DateFormatter()
+    private static let publicationDateParser = HHPublicationDateParser()
 
     @Published private(set) var results: [VacancySearchResult] = []
     @Published private(set) var favorites: [FavoriteVacancyRecord] = []
@@ -31,6 +31,8 @@ final class VacancySearchViewModel: ObservableObject {
     @Published private(set) var isLoading = false
     @Published private(set) var isPersistenceLoaded = false
     @Published private(set) var isExportingFavoritesPDF = false
+    @Published private(set) var isExportingStatisticsPDF = false
+    @Published private(set) var statisticsPDFExportMessage: String?
     @Published private(set) var favoritesPDFExportProgress: FavoritePDFExportProgress?
     @Published private(set) var errorMessage: String?
     @Published private(set) var statusMessage: String?
@@ -51,6 +53,7 @@ final class VacancySearchViewModel: ObservableObject {
     private let areaStore: AreaDirectoryStore
     private let favoritesStore: any FavoriteVacancyStoring
     private let favoritePDFExporter: any FavoriteVacanciesPDFExporting
+    private let statisticsPDFDestination: @MainActor (String) -> URL?
     private let currentDate: @Sendable () -> Date
     private var detailsCache: [String: HHVacancyDetails] = [:]
     private var cache: VacancySearchCache?
@@ -69,6 +72,7 @@ final class VacancySearchViewModel: ObservableObject {
         areaStore: AreaDirectoryStore = AreaDirectoryStore(),
         favoritesStore: any FavoriteVacancyStoring = InMemoryFavoriteVacancyStore(),
         favoritePDFExporter: (any FavoriteVacanciesPDFExporting)? = nil,
+        statisticsPDFDestination: (@MainActor (String) -> URL?)? = nil,
         currentDate: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.apiClient = apiClient
@@ -76,6 +80,7 @@ final class VacancySearchViewModel: ObservableObject {
         self.areaStore = areaStore
         self.favoritesStore = favoritesStore
         self.favoritePDFExporter = favoritePDFExporter ?? FavoriteVacanciesPDFExporter()
+        self.statisticsPDFDestination = statisticsPDFDestination ?? Self.chooseStatisticsPDFDestination
         self.currentDate = currentDate
     }
 
@@ -83,7 +88,11 @@ final class VacancySearchViewModel: ObservableObject {
 
     var canSearch: Bool { isPersistenceLoaded && !isLoading }
     var isShowingFavorites: Bool { displayMode == .favorites }
-    var canExportFavoritesPDF: Bool { !favorites.isEmpty && !isExportingFavoritesPDF }
+    var canExportFavoritesPDF: Bool { !favorites.isEmpty && !isExportingFavoritesPDF && !isExportingStatisticsPDF }
+    var canExportStatisticsPDF: Bool {
+        !isLoading && !isExportingFavoritesPDF && !isExportingStatisticsPDF
+            && (isShowingFavorites ? isPersistenceLoaded : cache != nil)
+    }
     var displayedVacancyCountMessage: String { "Показано вакансий: \(displayedResults.count)" }
 
     var employerFilterOptions: [VacancyFilterOption] {
@@ -344,7 +353,7 @@ final class VacancySearchViewModel: ObservableObject {
                 favorites[index].updateArchiveStatus(archived, checkedAt: currentDate())
                 didUpdate = true
             } catch is CancellationError {
-                return
+                break
             } catch let error as HHAPIError where shouldStopArchiveCheckCycle(after: error) {
                 break
             } catch {
@@ -385,7 +394,10 @@ final class VacancySearchViewModel: ObservableObject {
         do {
             let prepared = try await preparedForPDF(source)
             let worker = PDFExportWorker(fileManager: PDFFileManager(.default))
-            try await worker.exportPersonal(document: PDFAttributedDocument(VacancyPDFFormatter.attributedDocument(for: prepared)), destination: destination)
+            try await worker.exportPersonal(
+                vacancy: PDFVacancySnapshot(value: prepared),
+                destination: destination
+            )
             statusMessage = "Вакансия сохранена в PDF."
             return true
         } catch { statusMessage = "Не удалось сохранить PDF."; return false }
@@ -395,12 +407,19 @@ final class VacancySearchViewModel: ObservableObject {
         guard canExportFavoritesPDF else { return }
         isExportingFavoritesPDF = true
         defer { isExportingFavoritesPDF = false; favoritesPDFExportProgress = nil }
+        // Freeze local rows and membership before enrichment can suspend this actor.
+        let currentResults = unfilteredResults
+        let snapshot = favorites.map { favorite in
+            currentResults.first { $0.id == favorite.id } ?? favorite.searchResult
+        }
         do {
             var values: [VacancySearchResult] = []
-            for (index, favorite) in favorites.enumerated() {
-                values.append(try await preparedForPDF(result(favorite.id) ?? favorite.searchResult))
-                favoritesPDFExportProgress = .init(completedVacancies: index + 1, totalVacancies: favorites.count)
+            for (index, source) in snapshot.enumerated() {
+                try Task.checkCancellation()
+                values.append(try await preparedForPDF(source))
+                favoritesPDFExportProgress = .init(completedVacancies: index + 1, totalVacancies: snapshot.count)
             }
+            try Task.checkCancellation()
             let outcome = try await favoritePDFExporter.export(vacancies: values) { [weak self] in self?.favoritesPDFExportProgress = $0 }
             switch outcome {
             case .cancelled: break
@@ -408,13 +427,72 @@ final class VacancySearchViewModel: ObservableObject {
             case .exportedWithCleanupWarning(let files, let pages, let directory):
                 statusMessage = "Сохранено PDF: \(files), страниц: \(pages). Служебный каталог: \(directory.path)."
             }
-        } catch { statusMessage = "Не удалось сохранить избранное в PDF." }
+        } catch is CancellationError {
+            statusMessage = "Сохранение избранного в PDF отменено."
+        } catch {
+            statusMessage = "Не удалось сохранить избранное в PDF: \(error.localizedDescription)"
+        }
+    }
+
+    func statisticsReportSnapshot() -> VacancyStatisticsReport {
+        let employer = employerFilterOptions.first { $0.id == selectedEmployerID }?.title ?? selectedEmployerID
+        let region = regionFilterOptions.first { $0.id == selectedRegionID }?.title ?? selectedRegionID
+        var note = "Отчёт по локальной выборке на момент нажатия кнопки. Дополнительная проверка HH.ru не выполнялась."
+        if let cache {
+            note += " Последняя загрузка общего списка: \(cache.updatedAt.formatted(date: .numeric, time: .shortened))."
+        }
+        if errorMessage != nil { note += " Последнее обновление не завершено; использованы сохранённые данные." }
+        return VacancyStatisticsReport(
+            entries: displayedResults.map(VacancyStatisticsReport.Entry.init),
+            modeName: displayMode.rawValue,
+            employerID: selectedEmployerID,
+            employerName: employer,
+            regionID: selectedRegionID,
+            regionName: region,
+            createdAt: currentDate(),
+            timeZoneIdentifier: TimeZone.current.identifier,
+            sourceNote: note
+        )
+    }
+
+    func exportStatisticsPDF() async {
+        guard canExportStatisticsPDF else { return }
+        isExportingStatisticsPDF = true
+        statisticsPDFExportMessage = nil
+        defer { isExportingStatisticsPDF = false }
+        // Capture the rows and filter labels together, before the save panel suspends UI work.
+        let report = statisticsReportSnapshot()
+        guard let destination = statisticsPDFDestination(report.fileName) else { return }
+        do {
+            let worker = PDFExportWorker(fileManager: PDFFileManager(.default))
+            try await worker.exportStatistics(report: report, destination: destination)
+            statisticsPDFExportMessage = "Статистический отчёт сохранён: \(report.entries.count) вакансий."
+        } catch is CancellationError {
+            statisticsPDFExportMessage = "Сохранение отчёта отменено."
+        } catch {
+            statisticsPDFExportMessage = "Не удалось сохранить отчёт: \(error.localizedDescription)"
+        }
+    }
+
+    private static func chooseStatisticsPDFDestination(_ fileName: String) -> URL? {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.pdf]
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = fileName
+        return panel.runModal() == .OK ? panel.url : nil
     }
 
     private func preparedForPDF(_ source: VacancySearchResult) async throws -> VacancySearchResult {
+        try Task.checkCancellation()
         if source.isDetailLoaded { return source }
         do {
-            let details = try await apiClient.vacancyDetails(id: source.id)
+            let details: HHVacancyDetails
+            if let cached = detailsCache[source.id] {
+                details = cached
+            } else {
+                details = try await apiClient.vacancyDetails(id: source.id)
+            }
+            try Task.checkCancellation()
             detailsCache[source.id] = details
             return VacancySearchResult(
                 id: source.id,
@@ -426,6 +504,11 @@ final class VacancySearchViewModel: ObservableObject {
                 isArchived: details.archived ?? source.isArchived,
                 archiveCheckedAt: source.archiveCheckedAt
             )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as HHAPIError where shouldStopArchiveCheckCycle(after: error) {
+            // Access restrictions stop bulk PDF enrichment just like archive checks.
+            throw error
         } catch {
             return VacancySearchResult(
                 id: source.id,
@@ -449,7 +532,7 @@ final class VacancySearchViewModel: ObservableObject {
     }
     private func orderedNewestFirst(_ values: [VacancySearchResult]) -> [VacancySearchResult] {
         let datedValues = values.map { value in
-            (value: value, date: value.publishedAt.flatMap { Self.publicationDateFormatter.date(from: $0) })
+            (value: value, date: Self.publicationDateParser.date(from: value.publishedAt))
         }
         return datedValues.sorted { left, right in
             if left.date != right.date { return (left.date ?? .distantPast) > (right.date ?? .distantPast) }

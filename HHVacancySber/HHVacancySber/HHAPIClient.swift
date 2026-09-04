@@ -184,12 +184,17 @@ actor HHRequestGate {
     private let delay: UInt64
     private var lastFinishedAt: UInt64?
     private var isPerforming = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private struct Waiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Void, Error>
+    }
+    private var waiters: [Waiter] = []
+    var queuedRequestCount: Int { waiters.count }
 
     init(minimumDelayNanoseconds: UInt64 = defaultMinimumDelayNanoseconds) { delay = minimumDelayNanoseconds }
 
     func perform<T: Sendable>(_ operation: @Sendable () async throws -> T) async throws -> T {
-        await acquire()
+        try await acquire()
         defer {
             lastFinishedAt = DispatchTime.now().uptimeNanoseconds
             release()
@@ -203,12 +208,30 @@ actor HHRequestGate {
         return try await operation()
     }
 
-    private func acquire() async {
+    private func acquire() async throws {
+        try Task.checkCancellation()
         guard isPerforming else {
             isPerforming = true
             return
         }
-        await withCheckedContinuation { waiters.append($0) }
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                // Covers cancellation before the handler was installed/enqueued.
+                if Task.isCancelled {
+                    continuation.resume(throwing: CancellationError())
+                } else {
+                    waiters.append(Waiter(id: id, continuation: continuation))
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(id) }
+        }
+    }
+
+    private func cancelWaiter(_ id: UUID) {
+        guard let index = waiters.firstIndex(where: { $0.id == id }) else { return }
+        waiters.remove(at: index).continuation.resume(throwing: CancellationError())
     }
 
     private func release() {
@@ -216,7 +239,7 @@ actor HHRequestGate {
             isPerforming = false
             return
         }
-        waiters.removeFirst().resume()
+        waiters.removeFirst().continuation.resume()
     }
 }
 

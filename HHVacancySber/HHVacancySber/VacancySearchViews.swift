@@ -17,6 +17,8 @@ enum VacancySearchViews {
             VStack(spacing: 0) {
                 toolbar
                 Divider()
+                statusBar
+                Divider()
                 if let warning = viewModel.favoritesWarning { warningView(warning) }
                 content
             }
@@ -57,11 +59,14 @@ enum VacancySearchViews {
                     .accessibilityHidden(viewModel.updatedAtMessage == nil)
                     .accessibilityIdentifier("vacancyUpdateStatus")
 
-                Button(viewModel.isLoading ? "Обновление…" : "Обновить выборку", action: refresh)
-                    .buttonStyle(.borderedProminent)
-                    .frame(width: ToolbarMetrics.refreshWidth, height: ToolbarMetrics.controlHeight)
-                    .disabled(!viewModel.canSearch)
-                    .accessibilityIdentifier("searchVacanciesButton")
+                Button(action: refresh) {
+                    Text(viewModel.isLoading ? "Обновление…" : "Обновить выборку")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .frame(width: ToolbarMetrics.refreshWidth, height: ToolbarMetrics.controlHeight)
+                .disabled(!viewModel.canSearch)
+                .accessibilityIdentifier("searchVacanciesButton")
             }
             .controlSize(.large)
             .padding(.horizontal, 20)
@@ -84,29 +89,44 @@ enum VacancySearchViews {
             }
         }
 
+        private var statusBar: some View {
+            HStack(spacing: 12) {
+                Text(viewModel.displayedVacancyCountMessage)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .accessibilityIdentifier("displayedVacancyCount")
+                if viewModel.isLoading, let status = viewModel.statusMessage {
+                    Text("· \(status)").lineLimit(1)
+                } else if let message = viewModel.statisticsPDFExportMessage {
+                    Text(message).lineLimit(1).help(message)
+                        .accessibilityIdentifier("statisticsPDFExportMessage")
+                }
+                Spacer()
+                if viewModel.isShowingFavorites {
+                    if let progress = viewModel.favoritesPDFExportProgress {
+                        ProgressView(value: Double(progress.completedVacancies), total: Double(max(1, progress.totalVacancies))).frame(width: 90)
+                    }
+                    PDFExportCommand(title: viewModel.isExportingFavoritesPDF ? "Экспорт…" : "Экспортировать всё в PDF") {
+                        Task { await viewModel.exportFavoriteVacanciesPDF() }
+                    }.disabled(!viewModel.canExportFavoritesPDF)
+                        .accessibilityIdentifier("exportFavoritesPDFButton")
+                }
+                PDFExportCommand(title: viewModel.isExportingStatisticsPDF ? "Сохранение…" : "Статистика в PDF") {
+                    Task { await viewModel.exportStatisticsPDF() }
+                }
+                .disabled(!viewModel.canExportStatisticsPDF)
+                .help("Сохранить статистику и список вакансий под текущими фильтрами")
+                .accessibilityIdentifier("exportStatisticsPDFButton")
+            }
+            .font(.system(size: 13))
+            .foregroundColor(.secondary)
+            .padding(.leading, 28)
+            .padding(.trailing, 28)
+            .frame(height: 48)
+        }
+
         private var results: some View {
             VStack(spacing: 0) {
-                HStack {
-                    Text(viewModel.displayedVacancyCountMessage)
-                        .accessibilityIdentifier("displayedVacancyCount")
-                    if viewModel.isLoading, let status = viewModel.statusMessage {
-                        Text("· \(status)")
-                    }
-                    Spacer()
-                    if viewModel.isShowingFavorites {
-                        if let progress = viewModel.favoritesPDFExportProgress {
-                            ProgressView(value: Double(progress.completedVacancies), total: Double(max(1, progress.totalVacancies))).frame(width: 90)
-                        }
-                        Button(viewModel.isExportingFavoritesPDF ? "Экспорт…" : "Экспортировать всё в PDF") {
-                            Task { await viewModel.exportFavoriteVacanciesPDF() }
-                        }.disabled(!viewModel.canExportFavoritesPDF)
-                    }
-                }
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .padding(.horizontal, 28)
-                .frame(height: 40)
-                Divider()
                 if let error = viewModel.errorMessage { warningView(error) }
                 ScrollView {
                     LazyVStack(spacing: 0) {
@@ -140,6 +160,24 @@ enum VacancySearchViews {
                 Button(action, action: refresh).buttonStyle(.borderedProminent)
             }.padding(32).frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+}
+
+@MainActor
+private struct PDFExportCommand: View {
+    let title: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.body)
+                .frame(height: 32)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
+        .controlSize(.regular)
+        .foregroundColor(.primary)
     }
 }
 
@@ -182,9 +220,10 @@ private struct VacancyCard: View {
                 Button(isExpanded ? "Скрыть детали" : "Подробнее", action: toggleDetails)
                     .accessibilityIdentifier("expandVacancy.\(result.id)")
                 Spacer()
-                Button(exported ? "✓ Сохранено" : "Экспорт в PDF") {
+                PDFExportCommand(title: exported ? "✓ Сохранено" : "Экспорт в PDF") {
                     Task { if await exportPDF() { exported = true } }
                 }.disabled(exported)
+                    .accessibilityIdentifier("exportVacancyPDF.\(result.id)")
             }.buttonStyle(.borderless)
             if isExpanded { details }
         }

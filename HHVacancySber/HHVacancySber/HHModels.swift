@@ -7,6 +7,22 @@
 
 import Foundation
 
+// One parsing policy for HH publication timestamps in lists and reports.
+// Each owner keeps its own formatters; mutable Foundation objects are not shared across actors.
+struct HHPublicationDateParser {
+    private let standard = ISO8601DateFormatter()
+    private let fractional: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    func date(from value: String?) -> Date? {
+        guard let value else { return nil }
+        return standard.date(from: value) ?? fractional.date(from: value)
+    }
+}
+
 struct HHVacancySearchResponse: Decodable {
     let items: [HHVacancySummary]
     let found: Int

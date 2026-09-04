@@ -97,12 +97,91 @@ final class HHVacancySberUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Не удалось загрузить вакансии"].waitForExistence(timeout: 8))
     }
 
+    func testStatisticsPDFButtonIsAlignedAndAvailableForFilteredRows() {
+        let app = launch()
+        let report = app.buttons["exportStatisticsPDFButton"]
+        let refresh = app.buttons["searchVacanciesButton"]
+        XCTAssertTrue(report.waitForExistence(timeout: 5))
+        XCTAssertFalse(report.isEnabled)
+        XCTAssertEqual(report.frame.maxX, refresh.frame.maxX, accuracy: 2)
+        refresh.click()
+        XCTAssertTrue(app.staticTexts["vacancyTitle.ui-1"].waitForExistence(timeout: 8))
+        XCTAssertTrue(report.isEnabled)
+        XCTAssertEqual(report.frame.maxX, app.buttons["Экспорт в PDF"].firstMatch.frame.maxX, accuracy: 2)
+        XCTAssertEqual(report.label, "Статистика в PDF")
+        XCTAssertEqual(report.images.count, 0)
+        XCTAssertEqual(report.frame.height, 32, accuracy: 2)
+        XCTAssertEqual(report.frame.height, app.buttons["Экспорт в PDF"].firstMatch.frame.height, accuracy: 1)
+        choose("СБЕР", from: "employerFilterPicker", in: app)
+        choose("Москва", from: "regionFilterPicker", in: app)
+        XCTAssertTrue(app.staticTexts["Показано вакансий: 1"].exists)
+        XCTAssertTrue(report.isEnabled)
+        XCTAssertEqual(report.frame.maxX, refresh.frame.maxX, accuracy: 2)
+        let attachment = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
+        attachment.name = "Statistics PDF borderless command"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    func testFavoritePDFCommandsHaveMatchingHeightAndNoLeadingStatisticsIcon() {
+        let app = launch()
+        app.buttons["searchVacanciesButton"].click()
+        XCTAssertTrue(app.staticTexts["vacancyTitle.ui-1"].waitForExistence(timeout: 8))
+        app.buttons["☆ В избранное"].firstMatch.click()
+        let favoriteMode = app.radioButtons.matching(NSPredicate(format: "label BEGINSWITH %@", "Избранное")).firstMatch
+        XCTAssertTrue(favoriteMode.waitForExistence(timeout: 5))
+        favoriteMode.click()
+        let report = app.buttons["exportStatisticsPDFButton"]
+        let favorites = app.buttons["exportFavoritesPDFButton"]
+        let personal = app.buttons["exportVacancyPDF.ui-1"]
+        XCTAssertTrue(favorites.waitForExistence(timeout: 5))
+        XCTAssertTrue(report.isEnabled)
+        XCTAssertEqual(report.frame.height, favorites.frame.height, accuracy: 1)
+        XCTAssertEqual(report.frame.height, personal.frame.height, accuracy: 1)
+        XCTAssertEqual(report.frame.midY, favorites.frame.midY, accuracy: 1)
+        XCTAssertLessThan(favorites.frame.maxX, report.frame.minX)
+        XCTAssertEqual(report.frame.maxX, personal.frame.maxX, accuracy: 2)
+        XCTAssertEqual(report.images.count, 0)
+        let attachment = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
+        attachment.name = "Matching PDF commands in favorites"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    func testStatisticsCommandRemainsAvailableForEmptyCombinedFilter() {
+        let app = launch()
+        app.buttons["searchVacanciesButton"].click()
+        XCTAssertTrue(app.staticTexts["vacancyTitle.ui-1"].waitForExistence(timeout: 8))
+        choose("СБЕР", from: "employerFilterPicker", in: app)
+        choose("Удалённо", from: "regionFilterPicker", in: app)
+        XCTAssertTrue(app.staticTexts["Вакансий не найдено"].waitForExistence(timeout: 5))
+        let report = app.buttons["exportStatisticsPDFButton"]
+        XCTAssertTrue(report.isEnabled)
+        XCTAssertEqual(report.label, "Статистика в PDF")
+        XCTAssertEqual(report.frame.height, 32, accuracy: 2)
+        XCTAssertTrue(app.staticTexts["Показано вакансий: 0"].exists)
+    }
+
     private func choose(_ option: String, from pickerIdentifier: String, in app: XCUIApplication) {
         let picker = app.descendants(matching: .any)[pickerIdentifier]
-        XCTAssertTrue(picker.waitForExistence(timeout: 5))
+        guard picker.waitForExistence(timeout: 5) else {
+            XCTFail("Missing picker \(pickerIdentifier)")
+            return
+        }
+        let hittable = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "hittable == true"),
+            object: picker
+        )
+        guard XCTWaiter.wait(for: [hittable], timeout: 5) == .completed else {
+            XCTFail("Picker \(pickerIdentifier) is not ready for interaction")
+            return
+        }
         picker.click()
         let item = app.menuItems[option]
-        XCTAssertTrue(item.waitForExistence(timeout: 5), "Missing \(option) in \(pickerIdentifier)")
+        guard item.waitForExistence(timeout: 5) else {
+            XCTFail("Missing \(option) in \(pickerIdentifier)")
+            return
+        }
         item.click()
     }
 }

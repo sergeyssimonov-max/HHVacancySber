@@ -1,4 +1,6 @@
+import AppKit
 import Foundation
+import PDFKit
 import XCTest
 @testable import HHVacancySber
 
@@ -127,6 +129,34 @@ final class HHVacancySberTests: XCTestCase {
         }
     }
 
+    func testCollectorSearchRequestCountForOneLeaf() async throws {
+        let client = MockAPIClient(mode: .simple)
+        let values = try await VacancyCollectionService(client: client).collect(
+            employers: [.init(id: "3529", name: "СБЕР", comment: "test")],
+            areas: try AreaDirectoryIndex(root: Self.areaTree),
+            progress: { _ in }
+        )
+
+        let requestCount = await client.searchRequestCount
+        XCTAssertEqual(values.count, 1)
+        XCTAssertEqual(requestCount, 1)
+    }
+
+    func testCollectorSearchRequestCountForPartitionedResult() async throws {
+        let client = MockAPIClient(mode: .partitioned)
+        let values = try await VacancyCollectionService(client: client).collect(
+            employers: [.init(id: "3529", name: "СБЕР", comment: "test")],
+            areas: try AreaDirectoryIndex(root: .init(id: "113", name: "Россия", areas: [
+                .init(id: "10", name: "Регион A"), .init(id: "20", name: "Регион B")
+            ])),
+            progress: { _ in }
+        )
+
+        let requestCount = await client.searchRequestCount
+        XCTAssertEqual(values.count, 2_001)
+        XCTAssertEqual(requestCount, 22)
+    }
+
     func testAreaDirectoryUsesFreshThenExplicitStaleCacheAndRejectsCorruptionWithoutNetwork() async throws {
         let file = temporaryDirectory().appendingPathComponent("areas.json")
         let instant = Date(timeIntervalSince1970: 1_788_200_000)
@@ -164,6 +194,50 @@ final class HHVacancySberTests: XCTestCase {
 
         XCTAssertNil(snapshot.warning)
         XCTAssertEqual(snapshot.index.subjects.map(\.id), ["1", "2", "66"])
+    }
+
+    func testAreaDirectoryCancellationNeverBecomesStaleSuccessOrUnavailable() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let instant = Date(timeIntervalSince1970: 1_788_200_000)
+        let file = directory.appendingPathComponent("areas.json")
+        _ = try await AreaDirectoryStore(fileURL: file, now: { instant }).load(using: MockAPIClient(mode: .simple))
+        let original = try Data(contentsOf: file)
+        for cached in [true, false] {
+            let target = cached ? file : directory.appendingPathComponent("missing.json")
+            let store = AreaDirectoryStore(fileURL: target, now: { instant.addingTimeInterval(AreaDirectoryStore.defaultTTL + 1) })
+            do {
+                _ = try await store.load(using: CancelledAreaClient())
+                XCTFail("Cancellation must not return a stale snapshot")
+            } catch is CancellationError {
+                // Cancellation is not a failed directory lookup.
+            } catch {
+                XCTFail("Cancellation was replaced with \(error)")
+            }
+        }
+        XCTAssertEqual(try Data(contentsOf: file), original)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent("missing.json").path))
+    }
+
+    func testAreaDirectoryTaskCancellationDoesNotPublishLateResponse() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("areas.json")
+        let started = expectation(description: "Area request started")
+        let responseGate = TestAsyncSignal()
+        let client = CancelledAreaClient(responseGate: responseGate, onRequest: { started.fulfill() })
+        let task = Task { try await AreaDirectoryStore(fileURL: file).load(using: client) }
+        await fulfillment(of: [started], timeout: 2)
+        task.cancel()
+        await responseGate.signal()
+        do {
+            _ = try await task.value
+            XCTFail("A late successful response must not complete a cancelled load")
+        } catch is CancellationError {
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
     }
 
     func testFreshAreaTreeRemainsAvailableWhenCacheWriteFails() async throws {
@@ -246,6 +320,80 @@ final class HHVacancySberTests: XCTestCase {
         } catch {
             XCTFail("Unexpected error: \(error)")
         }
+    }
+
+    func testRequestGateCancelsQueuedWaiterBeforeActiveRequestFinishes() async throws {
+        let gate = HHRequestGate(minimumDelayNanoseconds: 0)
+        let activeStarted = expectation(description: "active started")
+        let blocker = TestAsyncSignal()
+        let active = Task {
+            try await gate.perform {
+                activeStarted.fulfill()
+                await blocker.wait()
+                return 1
+            }
+        }
+        await fulfillment(of: [activeStarted], timeout: 2)
+        let cancelled = expectation(description: "queued task cancelled without releasing active")
+        let queued = Task {
+            do {
+                _ = try await gate.perform { XCTFail("Cancelled request executed"); return 2 }
+                XCTFail("Expected cancellation")
+            } catch is CancellationError { cancelled.fulfill() }
+            catch { XCTFail("Unexpected error: \(error)") }
+        }
+        for _ in 0..<1000 {
+            if await gate.queuedRequestCount == 1 { break }
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        let before = await gate.queuedRequestCount
+        XCTAssertEqual(before, 1)
+        queued.cancel()
+        await fulfillment(of: [cancelled], timeout: 1)
+        let after = await gate.queuedRequestCount
+        XCTAssertEqual(after, 0)
+        await blocker.signal()
+        _ = try await active.value
+        await queued.value
+        let next = try await gate.perform { 3 }
+        XCTAssertEqual(next, 3)
+    }
+
+    func testRequestGateCancellationRaceReleasesEveryWaiterAndPreservesSerialization() async throws {
+        let gate = HHRequestGate(minimumDelayNanoseconds: 0)
+        let tracker = ConcurrentOperationTracker()
+        for _ in 0..<10 {
+            let tasks = (0..<20).map { index in
+                Task {
+                    try await gate.perform {
+                        await tracker.begin()
+                        await Task.yield()
+                        await tracker.end()
+                        return index
+                    }
+                }
+            }
+            for (index, task) in tasks.enumerated() where index.isMultiple(of: 2) { task.cancel() }
+            for task in tasks { _ = await task.result }
+        }
+        let queued = await gate.queuedRequestCount
+        let peak = await tracker.maximumConcurrentOperations
+        XCTAssertEqual(queued, 0)
+        XCTAssertEqual(peak, 1)
+        let next = try await gate.perform { true }
+        XCTAssertTrue(next)
+    }
+
+    func testRequestGateCancellationDuringPacingDoesNotRunOperation() async throws {
+        let gate = HHRequestGate(minimumDelayNanoseconds: 500_000_000)
+        _ = try await gate.perform { 1 }
+        let task = Task { try await gate.perform { XCTFail("Must cancel during pacing"); return 2 } }
+        try await Task.sleep(nanoseconds: 20_000_000)
+        task.cancel()
+        do { _ = try await task.value; XCTFail("Expected cancellation") }
+        catch is CancellationError {} catch { XCTFail("Unexpected error: \(error)") }
+        let next = try await gate.perform { 3 }
+        XCTAssertEqual(next, 3)
     }
 
     func testRequestGateSerializesConcurrentOperations() async throws {
@@ -509,6 +657,69 @@ final class HHVacancySberTests: XCTestCase {
         await model.waitForPendingFavoritesSaves()
 
         XCTAssertEqual(store.saveCount, 0)
+    }
+
+    @MainActor
+    func testArchiveCancellationPersistsCompletedUpdatesAndStopsRemainingRequests() async {
+        let now = Date(timeIntervalSince1970: 1_788_200_000)
+        let records = ["3529-ok", "3529-cancel", "3529-unreached"].enumerated().map { index, id in
+            FavoriteVacancyRecord(result: statisticsVacancy(id: id, date: nil),
+                favoritedAt: Date(timeIntervalSince1970: Double(3 - index)), updatedAt: .distantPast)
+        }
+        let store = SlowRecordingFavoriteStore(favorites: records)
+        let client = MockAPIClient(mode: .archiveCancelled)
+        let model = VacancySearchViewModel(apiClient: client, employerStore: TestEmployerStore(entries: []),
+            favoritesStore: store, currentDate: { now })
+        await model.checkArchiveStatusesIfNeeded()
+        await model.waitForPendingFavoritesSaves()
+        let requests = await client.requestedDetailIDs
+        XCTAssertEqual(requests, ["3529-ok", "3529-cancel"])
+        XCTAssertEqual(store.saveCount, 1)
+        XCTAssertEqual(store.lastSaved.first?.isArchived, true)
+        XCTAssertEqual(store.lastSaved.first?.archiveCheckedAt, now)
+        XCTAssertEqual(store.lastSaved, model.favorites)
+        XCTAssertNil(model.favorites[1].archiveCheckedAt)
+        await model.checkArchiveStatusesIfNeeded()
+        let repeated = await client.requestedDetailIDs
+        XCTAssertEqual(repeated, ["3529-ok", "3529-cancel", "3529-cancel"])
+        XCTAssertEqual(store.saveCount, 1)
+    }
+
+    @MainActor
+    func testArchiveTaskCancellationStillSavesEarlierCompletedCheck() async throws {
+        let records = ["3529-first", "3529-second"].enumerated().map { index, id in
+            FavoriteVacancyRecord(result: statisticsVacancy(id: id, date: nil),
+                favoritedAt: Date(timeIntervalSince1970: Double(2 - index)), updatedAt: .distantPast)
+        }
+        let store = SlowRecordingFavoriteStore(favorites: records)
+        let client = MockAPIClient(mode: .delayedArchive)
+        let model = VacancySearchViewModel(apiClient: client, employerStore: TestEmployerStore(entries: []), favoritesStore: store)
+        let task = Task { await model.checkArchiveStatusesIfNeeded() }
+        for _ in 0..<1000 {
+            if await client.requestedDetailIDs.count == 2 { break }
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        task.cancel()
+        await task.value
+        await model.waitForPendingFavoritesSaves()
+        XCTAssertEqual(store.saveCount, 1)
+        XCTAssertNotNil(store.lastSaved.first?.archiveCheckedAt)
+        XCTAssertNil(store.lastSaved.last?.archiveCheckedAt)
+        XCTAssertEqual(store.lastSaved, model.favorites)
+    }
+
+    @MainActor
+    func testArchiveCancellationBeforeAnyUpdateDoesNotWriteFavorites() async {
+        let record = FavoriteVacancyRecord(result: statisticsVacancy(id: "3529-cancel", date: nil),
+            favoritedAt: .distantPast, updatedAt: .distantPast)
+        let store = SlowRecordingFavoriteStore(favorites: [record])
+        let model = VacancySearchViewModel(apiClient: MockAPIClient(mode: .archiveCancelled),
+            employerStore: TestEmployerStore(entries: []), favoritesStore: store)
+        await model.checkArchiveStatusesIfNeeded()
+        await model.waitForPendingFavoritesSaves()
+        XCTAssertEqual(store.saveCount, 0)
+        XCTAssertEqual(store.lastSaved, [record])
+        XCTAssertEqual(model.favorites, [record])
     }
 
     @MainActor
@@ -776,6 +987,1107 @@ final class HHVacancySberTests: XCTestCase {
         XCTAssertEqual(requestedIDs, ["3529-fail"])
     }
 
+    @MainActor
+    func testFavoritePDFExportProducesBoundedValidPartsAndMainActorProgress() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixedDate = Date(timeIntervalSince1970: 1_788_400_000)
+        let vacancies = (0..<101).map { makePDFVacancy(id: String($0)) }
+        var progressValues: [FavoritePDFExportProgress] = []
+        var progressWasOnMainThread = true
+        let exporter = FavoriteVacanciesPDFExporter(
+            chooseDirectory: { directory },
+            confirmReplacement: { _ in true },
+            now: { fixedDate }
+        )
+
+        let outcome = try await exporter.export(vacancies: vacancies) { progress in
+            progressWasOnMainThread = progressWasOnMainThread && Thread.isMainThread
+            progressValues.append(progress)
+        }
+
+        guard case .exportedWithCleanupWarning(let fileCount, let pageCount, _) = outcome else {
+            return XCTFail("Expected a completed export")
+        }
+        XCTAssertEqual(fileCount, 2)
+        XCTAssertEqual(pageCount, 101)
+        XCTAssertEqual(progressValues.first, .init(completedVacancies: 1, totalVacancies: 101))
+        XCTAssertEqual(progressValues.last, .init(completedVacancies: 101, totalVacancies: 101))
+        XCTAssertTrue(progressWasOnMainThread)
+
+        let pdfs = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        ).filter { $0.pathExtension == "pdf" }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+        XCTAssertEqual(pdfs.count, 2)
+        try FavoriteVacanciesPDFExporter.validatePDF(at: pdfs[0], expectedPages: 100)
+        try FavoriteVacanciesPDFExporter.validatePDF(at: pdfs[1], expectedPages: 1)
+        let documents = try pdfs.map { try XCTUnwrap(PDFDocument(url: $0)) }
+        let text = try documents.map(extractedStatisticsText).joined(separator: "\n")
+        var previous = text.startIndex
+        for vacancy in vacancies {
+            let titleLine = vacancy.name + "\n"
+            XCTAssertEqual(text.components(separatedBy: titleLine).count - 1, 1)
+            let range = try XCTUnwrap(text.range(of: titleLine))
+            XCTAssertGreaterThanOrEqual(range.lowerBound, previous)
+            previous = range.upperBound
+        }
+        for document in documents {
+            XCTAssertNotNil(document.documentAttributes?[PDFDocumentAttribute.creationDateAttribute] as? Date)
+            XCTAssertNotNil(document.documentAttributes?[PDFDocumentAttribute.producerAttribute] as? String)
+        }
+    }
+
+    @MainActor
+    func testCancelledFavoritePDFSelectionReleasesPreparationAndAllowsNextExport() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var selectedDirectory: URL?
+        let exporter = FavoriteVacanciesPDFExporter(
+            chooseDirectory: { selectedDirectory },
+            confirmReplacement: { _ in true },
+            now: { Date(timeIntervalSince1970: 1_788_400_000) }
+        )
+        let vacancy = makePDFVacancy(id: "cancel-retry")
+
+        let cancelled = try await exporter.export(vacancies: [vacancy]) { _ in }
+        XCTAssertEqual(cancelled, .cancelled)
+
+        selectedDirectory = directory
+        let completed = try await exporter.export(vacancies: [vacancy]) { _ in }
+        guard case .exportedWithCleanupWarning(let files, let pages, _) = completed else {
+            return XCTFail("Expected the next export to complete")
+        }
+        XCTAssertEqual(files, 1)
+        XCTAssertEqual(pages, 1)
+    }
+
+    func testPDFPaginationPreservesOversizedUnicodeContentAndRendersEveryPage() throws {
+        let paragraph = "ОченьДлиннаяНепрерывнаяСтрокаБезПробелов0123456789🙂"
+        let source = (0..<1_000).map { "\($0): \(paragraph)\n" }.joined()
+        let attributed = NSAttributedString(
+            string: source,
+            attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.black]
+        )
+
+        let pages = FavoriteVacanciesPDFExporter.pages(for: attributed)
+
+        XCTAssertGreaterThan(pages.count, 1)
+        XCTAssertEqual(pages.map(\.content.string).joined(), source)
+        let data = try FavoriteVacanciesPDFExporter.pdfData(for: pages)
+        try FavoriteVacanciesPDFExporter.validatePDF(data: data, expectedPages: pages.count)
+    }
+
+    func testPDFHeadingAndBodyTypographyUsesReducedPointSizes() throws {
+        let document = VacancyPDFFormatter.attributedDocument(for: makePDFVacancy(id: "typography"))
+        let text = document.string as NSString
+
+        func fontSize(at substring: String, offset: Int = 0) throws -> CGFloat {
+            let range = text.range(of: substring)
+            guard range.location != NSNotFound else {
+                XCTFail("Missing PDF text: \(substring)")
+                return 0
+            }
+            let location = range.location + offset
+            return try XCTUnwrap(
+                document.attribute(.font, at: location, effectiveRange: nil) as? NSFont
+            ).pointSize
+        }
+
+        XCTAssertEqual(try fontSize(at: "Инженер надёжности typography"), 18, accuracy: 0.01)
+        XCTAssertEqual(try fontSize(at: "Основная информация"), 13, accuracy: 0.01)
+        XCTAssertEqual(try fontSize(at: "Работодатель: СБЕР"), 9.5, accuracy: 0.01)
+        XCTAssertEqual(
+            try fontSize(at: "Работодатель: СБЕР", offset: ("Работодатель: " as NSString).length),
+            7.5,
+            accuracy: 0.01
+        )
+    }
+
+    func testPersonalPDFWorkerCreatesAtomicValidDocument() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let destination = directory.appendingPathComponent("personal.pdf")
+        let worker = PDFExportWorker(fileManager: PDFFileManager(.default))
+
+        try await worker.exportPersonal(
+            vacancy: PDFVacancySnapshot(value: makePDFVacancy(id: "personal")),
+            destination: destination
+        )
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: destination.path))
+        try FavoriteVacanciesPDFExporter.validatePDF(at: destination, expectedPages: 1)
+    }
+
+    func testPersonalPDFCancellationOnLastPageNeverPublishesAndAllowsRetry() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let vacancy = makePDFVacancy(id: "last-page-cancel")
+        let worker = PDFExportWorker(fileManager: PDFFileManager(.default))
+        let originalURL = directory.appendingPathComponent("original.pdf")
+        try await worker.exportPersonal(vacancy: .init(value: makePDFVacancy(id: "original")), destination: originalURL)
+        let original = try Data(contentsOf: originalURL)
+        for existing in [false, true] {
+            let destination = directory.appendingPathComponent(existing ? "existing.pdf" : "new.pdf")
+            if existing { try original.write(to: destination, options: .atomic) }
+            let task = Task {
+                try await worker.exportPersonal(vacancy: .init(value: vacancy), destination: destination) { _ in
+                    withUnsafeCurrentTask { $0?.cancel() }
+                }
+            }
+            do {
+                try await task.value
+                XCTFail("Cancellation on the final page must prevent publication")
+            } catch is CancellationError {
+            } catch {
+                XCTFail("Unexpected error: \(error)")
+            }
+            if existing {
+                XCTAssertEqual(try Data(contentsOf: destination), original)
+            } else {
+                XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
+            }
+            try await worker.exportPersonal(vacancy: .init(value: vacancy), destination: destination)
+            let pdf = try XCTUnwrap(PDFDocument(url: destination))
+            XCTAssertEqual(pdf.pageCount, 1)
+            XCTAssertTrue(pdf.string?.contains("last-page-cancel") == true)
+        }
+        XCTAssertEqual(Set(try FileManager.default.contentsOfDirectory(atPath: directory.path)),
+                       Set(["original.pdf", "existing.pdf", "new.pdf"]))
+    }
+
+    @MainActor
+    func testPDFFallbackPreservesSummaryFieldsInPersonalAndFavoriteDocuments() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let summary = HHVacancySummary(id: "fallback-fields", name: "UNIQUE_TITLE_ALPHA",
+            employer: .init(name: "СБЕР", id: "3529"),
+            salary: .init(from: 123_456, to: nil, currency: "RUR", gross: false),
+            area: .init(id: "1", name: "Москва"), alternateURL: "https://example.invalid/fallback-fields",
+            url: nil, snippet: .init(requirement: "UNIQUE_SNIPPET_BETA", responsibility: nil),
+            department: .init(name: "DepartmentFallback"), publishedAt: "2026-09-02T12:34:56+0300")
+        let value = VacancySearchResult(id: summary.id, summary: summary,
+            details: .init(id: summary.id, name: summary.name, employer: nil, area: nil,
+                salary: nil, alternateURL: nil, description: nil),
+            location: .subject(id: "1", name: "Москва", cityID: "1", cityName: "Москва"))
+        let worker = PDFExportWorker(fileManager: PDFFileManager(.default))
+        let personal = directory.appendingPathComponent("personal.pdf")
+        try await worker.exportPersonal(vacancy: .init(value: value), destination: personal)
+        let exporter = FavoriteVacanciesPDFExporter(chooseDirectory: { directory },
+            now: { Date(timeIntervalSince1970: 1_788_400_000) })
+        _ = try await exporter.export(vacancies: [value]) { _ in }
+        let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "pdf" }
+        XCTAssertEqual(files.count, 2)
+        for file in files {
+            let pdf = try XCTUnwrap(PDFDocument(url: file))
+            XCTAssertEqual(pdf.pageCount, 1)
+            let text = try extractedStatisticsText(pdf)
+            XCTAssertEqual(text.components(separatedBy: "UNIQUE_TITLE_ALPHA").count - 1, 1)
+            XCTAssertEqual(text.components(separatedBy: "UNIQUE_SNIPPET_BETA").count - 1, 1)
+            XCTAssertTrue(text.contains("DepartmentFallback"), "Lost summary department")
+            XCTAssertTrue(text.contains("2026-09-02T12:34:56+0300"), "Lost summary publication date")
+            XCTAssertTrue(text.contains("123 456"), "Lost summary salary")
+            XCTAssertTrue(text.contains("https://example.invalid/fallback-fields"))
+            XCTAssertTrue(text.contains("Полное описание из detail endpoint HH недоступно."))
+            let attachment = XCTAttachment(data: try Data(contentsOf: file), uniformTypeIdentifier: "com.adobe.pdf")
+            attachment.name = file.lastPathComponent == "personal.pdf" ? "Fallback personal PDF" : "Fallback favorites PDF"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+    }
+
+    func testPDFFallbackDoesNotOverrideAvailableDetailFields() throws {
+        let summary = HHVacancySummary(id: "priority", name: "Priority title", employer: nil,
+            salary: .init(from: 123_456, to: nil, currency: "RUR", gross: nil), area: nil,
+            alternateURL: nil, url: nil, snippet: nil, department: .init(name: "SummaryDepartment"),
+            publishedAt: "2026-09-01T10:00:00Z")
+        let value = VacancySearchResult(id: summary.id, summary: summary,
+            details: .init(id: summary.id, name: summary.name, employer: nil, area: nil,
+                salary: .init(from: 987_654, to: nil, currency: "RUR", gross: nil), alternateURL: nil,
+                description: nil, publishedAt: "2026-09-02T10:00:00Z", department: .init(name: "DetailDepartment")),
+            isDetailLoaded: true)
+        let pages = FavoriteVacanciesPDFExporter.pages(for: VacancyPDFFormatter.attributedDocument(for: value))
+        let pdf = try XCTUnwrap(PDFDocument(data: FavoriteVacanciesPDFExporter.pdfData(for: pages)))
+        let text = try extractedStatisticsText(pdf)
+        for expected in ["DetailDepartment", "2026-09-02T10:00:00Z", "987 654"] {
+            XCTAssertTrue(text.contains(expected))
+        }
+        for absent in ["SummaryDepartment", "2026-09-01T10:00:00Z", "123 456"] {
+            XCTAssertFalse(text.contains(absent))
+        }
+    }
+
+    func testPDFPublicationFailureAndCancellationRestoreOriginalsAndRetainRecovery() async throws {
+        for cancel in [false, true] {
+            let directory = temporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let names = ["part-1.pdf", "part-2.pdf"]
+            let oldPages = FavoriteVacanciesPDFExporter.pages(for: VacancyPDFFormatter.attributedDocument(for: makePDFVacancy(id: "original")))
+            let original = try FavoriteVacanciesPDFExporter.pdfData(for: oldPages)
+            for name in names { try original.write(to: directory.appendingPathComponent(name), options: .atomic) }
+            let worker = PDFExportWorker(fileManager: PDFFileManager(.default), beforePublishingPart: { index in
+                guard index == 1 else { return }
+                if cancel { withUnsafeCurrentTask { $0?.cancel() } }
+                else { throw CocoaError(.fileWriteUnknown) }
+            })
+            _ = try await worker.prepare(vacancies: .init(values: (0..<101).map { makePDFVacancy(id: "replacement-\($0)") }), progress: { _ in })
+            let plan = try await worker.collisionPlan(names: names, directory: directory)
+            let task = Task { try await worker.publish(names: names, directory: directory, authorizations: plan.authorizations) }
+            do {
+                _ = try await task.value
+                XCTFail("Expected interrupted publication")
+            } catch let error as PDFTransactionRecoveryError {
+                XCTAssertEqual(error.originalError is CancellationError, cancel)
+                XCTAssertTrue(error.unrestoredDestinations.isEmpty)
+                XCTAssertTrue(error.preservedBackupURLs.isEmpty)
+                XCTAssertEqual(error.preservedPublishedOutputURLs.count, 1)
+                let recovery = try XCTUnwrap(error.recoveryDirectory.url)
+                XCTAssertTrue(FileManager.default.fileExists(atPath: recovery.appendingPathComponent(".cleanup_forbidden").path))
+                let retained = try XCTUnwrap(error.preservedPublishedOutputURLs.first)
+                let pdf = try XCTUnwrap(PDFDocument(url: retained))
+                XCTAssertEqual(pdf.pageCount, 100)
+                XCTAssertTrue(pdf.string?.contains("replacement-0") == true)
+            }
+            for name in names {
+                let destination = directory.appendingPathComponent(name)
+                XCTAssertEqual(try Data(contentsOf: destination), original)
+                XCTAssertEqual(try XCTUnwrap(PDFDocument(url: destination)).pageCount, 1)
+            }
+        }
+    }
+
+    func testPDFStagedValidationFailureLeavesOriginalUntouched() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let destination = directory.appendingPathComponent("original.pdf")
+        let original = try FavoriteVacanciesPDFExporter.pdfData(for: FavoriteVacanciesPDFExporter.pages(
+            for: VacancyPDFFormatter.attributedDocument(for: makePDFVacancy(id: "original"))))
+        try original.write(to: destination, options: .atomic)
+        let worker = PDFExportWorker(fileManager: PDFFileManager(.default), validateStagedPart: { _, _ in
+            throw CocoaError(.fileReadCorruptFile)
+        })
+        _ = try await worker.prepare(vacancies: .init(values: [makePDFVacancy(id: "replacement")]), progress: { _ in })
+        let plan = try await worker.collisionPlan(names: [destination.lastPathComponent], directory: directory)
+        do {
+            _ = try await worker.publish(names: [destination.lastPathComponent], directory: directory, authorizations: plan.authorizations)
+            XCTFail("Invalid staged data must not be published")
+        } catch let error as PDFTransactionRecoveryError {
+            XCTAssertTrue(error.unrestoredDestinations.isEmpty)
+            XCTAssertTrue(error.preservedPublishedOutputURLs.isEmpty)
+        }
+        XCTAssertEqual(try Data(contentsOf: destination), original)
+    }
+
+    func testPDFCollisionRetainsBackupForNonDestructiveManualRecovery() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let destination = directory.appendingPathComponent("original.pdf")
+        let original = try FavoriteVacanciesPDFExporter.pdfData(for: FavoriteVacanciesPDFExporter.pages(
+            for: VacancyPDFFormatter.attributedDocument(for: makePDFVacancy(id: "original"))))
+        try original.write(to: destination, options: .atomic)
+        let otherWriter = Data("Concurrent user document".utf8)
+        let worker = PDFExportWorker(fileManager: PDFFileManager(.default), beforePublishingPart: { _ in
+            try otherWriter.write(to: destination, options: .atomic)
+        })
+        _ = try await worker.prepare(vacancies: .init(values: [makePDFVacancy(id: "replacement")]), progress: { _ in })
+        let plan = try await worker.collisionPlan(names: [destination.lastPathComponent], directory: directory)
+        do {
+            _ = try await worker.publish(names: [destination.lastPathComponent], directory: directory, authorizations: plan.authorizations)
+            XCTFail("Concurrent destination must not be overwritten")
+        } catch let error as PDFTransactionRecoveryError {
+            XCTAssertEqual(error.unrestoredDestinations, [destination])
+            let backup = try XCTUnwrap(error.preservedBackupURLs.first)
+            XCTAssertEqual(try Data(contentsOf: backup), original)
+            let recovered = directory.appendingPathComponent("recovered-copy.pdf")
+            try FileManager.default.copyItem(at: backup, to: recovered)
+            XCTAssertEqual(try Data(contentsOf: recovered), original)
+            XCTAssertEqual(try XCTUnwrap(PDFDocument(url: recovered)).pageCount, 1)
+            XCTAssertTrue(error.localizedDescription.contains(backup.path))
+        }
+        XCTAssertEqual(try Data(contentsOf: destination), otherWriter)
+    }
+
+    func testHTMLSanitizerIsSafeAndDeterministicUnderConcurrentUse() async {
+        let source = """
+        <!-- secret --><div class="layout"><h2>Кириллица</h2><script>alert(1)</script>
+        <a href="https://hh.ru/vacancy/42" onclick="alert(2)">HH</a>
+        <a href="javascript:alert(3)">bad</a><img src="https://example.invalid/tracker.png"></div>
+        """
+        let expected = VacancyHTMLAttributedText.sanitize(source)
+
+        XCTAssertFalse(expected.contains("secret"))
+        XCTAssertFalse(expected.contains("script"))
+        XCTAssertFalse(expected.contains("onclick"))
+        XCTAssertFalse(expected.contains("javascript"))
+        XCTAssertFalse(expected.contains("img"))
+        XCTAssertTrue(expected.contains("<a href=\"https://hh.ru/vacancy/42\">"))
+        XCTAssertTrue(expected.contains("Кириллица"))
+
+        let values = await withTaskGroup(of: String.self, returning: [String].self) { group in
+            for _ in 0..<100 {
+                group.addTask { VacancyHTMLAttributedText.sanitize(source) }
+            }
+            var values: [String] = []
+            for await value in group { values.append(value) }
+            return values
+        }
+        XCTAssertEqual(Set(values), [expected])
+    }
+
+    @MainActor
+    func testStatisticsSnapshotUsesCombinedFiltersAndRemainsStable() async {
+        let model = makeFilterViewModel()
+        await model.search()
+        model.selectedEmployerID = "3529"
+        model.selectedRegionID = "subject:1"
+        let snapshot = model.statisticsReportSnapshot()
+        XCTAssertEqual(snapshot.entries.map(\.id), ["filter-moscow"])
+        XCTAssertEqual(snapshot.employerName, "СБЕР")
+        XCTAssertEqual(snapshot.regionName, "Москва")
+        model.selectedRegionID = "all"
+        XCTAssertEqual(snapshot.entries.map(\.id), ["filter-moscow"])
+        model.toggleFavorite(id: "filter-moscow")
+        model.displayMode = .favorites
+        XCTAssertEqual(model.statisticsReportSnapshot().entries.map(\.id), ["filter-moscow"])
+        XCTAssertEqual(model.statisticsReportSnapshot().modeName, "Избранное")
+        model.displayMode = .all
+        model.selectedRegionID = "remote"
+        XCTAssertTrue(model.statisticsReportSnapshot().entries.isEmpty)
+        XCTAssertTrue(model.canExportStatisticsPDF)
+    }
+
+    func testStatisticsChronologyCountsMissingDatesAndPDFCompleteness() throws {
+        let report = statisticsFixture([
+            statisticsVacancy(id: "old", date: "2026-09-01T10:00:00+0300"),
+            statisticsVacancy(id: "unknown", date: nil),
+            statisticsVacancy(id: "new", date: "2026-09-03T10:00:00+0300", salary: true),
+            statisticsVacancy(id: "fractional", date: "2026-09-03T08:00:00.500Z", archived: true),
+            statisticsVacancy(id: "bad", date: "invalid")
+        ])
+        XCTAssertEqual(report.orderedEntries().map(\.entry.id), ["fractional", "new", "old", "bad", "unknown"])
+        let document = try report.attributedDocument()
+        XCTAssertTrue(document.string.contains("Всего вакансий: 5"))
+        XCTAssertTrue(document.string.contains("В архиве: 1"))
+        XCTAssertTrue(document.string.contains("С указанной зарплатой: 1"))
+        XCTAssertTrue(document.string.contains("Без корректной даты размещения: 2"))
+        let pages = FavoriteVacanciesPDFExporter.pages(for: document)
+        XCTAssertEqual(pages.map(\.content.string).joined(), document.string)
+        let data = try FavoriteVacanciesPDFExporter.pdfData(for: pages)
+        let pdf = try XCTUnwrap(PDFDocument(data: data))
+        let text = try extractedStatisticsText(pdf)
+        XCTAssertTrue(text.contains("Вакансия fractional"))
+        XCTAssertTrue(text.contains("Вакансия unknown"))
+        XCTAssertTrue(text.contains("03.09.2026 08:00"))
+    }
+
+    func testStatisticsFilenameRetainsBothFiltersAndIsSafeForLongLabels() {
+        let report = statisticsFixture([])
+        XCTAssertTrue(report.fileName.contains("сбер"))
+        XCTAssertTrue(report.fileName.contains("москва"))
+        let long = VacancyStatisticsReport(
+            entries: [], modeName: "Все вакансии", employerID: "3529",
+            employerName: String(repeating: "Очень длинное / название ", count: 50),
+            regionID: "subject:1", regionName: String(repeating: "Москва ", count: 50),
+            createdAt: report.createdAt, timeZoneIdentifier: "UTC", sourceNote: ""
+        )
+        XCTAssertLessThanOrEqual(long.fileName.utf8.count, PDFFileNameBuilder.maximumUTF8Length)
+        XCTAssertFalse(long.fileName.contains("/"))
+        XCTAssertTrue(long.fileName.contains("москва"))
+        XCTAssertTrue(long.fileName.hasSuffix(".pdf"))
+    }
+
+    @MainActor
+    func testStatisticsExportUsesFrozenRowsWithoutDetailRequestsAndCanRetry() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let client = MockAPIClient(mode: .filters)
+        var destination: URL?
+        var chosenName = ""
+        weak var observedModel: VacancySearchViewModel?
+        let model = VacancySearchViewModel(
+            apiClient: client,
+            employerStore: TestEmployerStore(entries: [.init(id: "3529", name: "СБЕР", comment: "test")]),
+            areaStore: AreaDirectoryStore(fileURL: directory.appendingPathComponent("areas.json")),
+            statisticsPDFDestination: { name in
+                chosenName = name
+                observedModel?.selectedRegionID = "all"
+                return destination
+            }
+        )
+        observedModel = model
+        XCTAssertFalse(model.canExportStatisticsPDF)
+        await model.search()
+        await model.exportStatisticsPDF() // cancelled save panel
+        XCTAssertFalse(model.isExportingStatisticsPDF)
+        XCTAssertNil(model.statisticsPDFExportMessage)
+        destination = directory.appendingPathComponent("missing/report.pdf")
+        await model.exportStatisticsPDF()
+        XCTAssertTrue(model.statisticsPDFExportMessage?.contains("Не удалось") == true)
+        destination = directory.appendingPathComponent("report.pdf")
+        model.selectedEmployerID = "3529"
+        model.selectedRegionID = "subject:1"
+        await model.exportStatisticsPDF()
+        let pdf = try XCTUnwrap(PDFDocument(url: try XCTUnwrap(destination)))
+        let text = try extractedStatisticsText(pdf)
+        XCTAssertTrue(text.contains("Вакансия filter-moscow"))
+        XCTAssertFalse(text.contains("Вакансия filter-ekb"))
+        XCTAssertTrue(chosenName.contains("москва"))
+        XCTAssertTrue(model.statisticsPDFExportMessage?.contains("сохранён: 1") == true)
+        XCTAssertTrue(model.canExportStatisticsPDF)
+        let detailRequests = await client.detailRequestCount
+        XCTAssertEqual(detailRequests, 0)
+    }
+
+    func testStatisticsEmptyAndMultipageReportsPreserveEveryRow() throws {
+        let empty = try statisticsFixture([]).attributedDocument()
+        XCTAssertTrue(empty.string.contains("Всего вакансий: 0"))
+        XCTAssertTrue(empty.string.contains("Под выбранными фильтрами вакансий нет."))
+        let report = statisticsFixture((0..<250).map {
+            statisticsVacancy(id: String($0), date: "2026-09-03T10:00:00+0300")
+        })
+        let document = try report.attributedDocument()
+        let pages = FavoriteVacanciesPDFExporter.pages(for: document)
+        XCTAssertGreaterThan(pages.count, 1)
+        XCTAssertEqual(pages.map(\.content.string).joined(), document.string)
+        let data = try FavoriteVacanciesPDFExporter.pdfData(for: pages)
+        try FavoriteVacanciesPDFExporter.validatePDF(data: data, expectedPages: pages.count)
+        let text = try extractedStatisticsText(XCTUnwrap(PDFDocument(data: data)))
+        for entry in report.entries { XCTAssertTrue(text.contains(entry.name + ":")) }
+    }
+
+    @MainActor
+    func testStatisticsPDFExportAcrossEveryEmployerAndRegionCombination() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let (model, client, panel) = makeStatisticsExportModel(directory: directory)
+        await model.search()
+        let rows = statisticsFilterRows
+        for employer in ["all", "3529", "2798", "9999"] {
+            for region in ["all", "subject:1", "subject:2", "subject:66", "remote", "unknown"] {
+                let expected = rows.filter {
+                    (employer == "all" || $0.employer == employer) && (region == "all" || $0.region == region)
+                }.map(\.id)
+                try await assertStatisticsExport(model, client: client, panel: panel,
+                                                 employer: employer, region: region, expected: expected)
+            }
+        }
+        XCTAssertEqual(panel.names.count, 24)
+        XCTAssertEqual(Set(panel.names).count, 24)
+    }
+
+    @MainActor
+    func testStatisticsPDFExportAcrossEveryFavoriteFilterCombination() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let (model, client, panel) = makeStatisticsExportModel(directory: directory)
+        await model.search()
+        let favoriteIDs = ["filter-moscow", "filter-unknown", "filter-remote"]
+        for id in favoriteIDs { model.toggleFavorite(id: id) }
+        model.displayMode = .favorites
+        for employer in ["all", "3529", "2798"] {
+            for region in ["all", "subject:1", "remote", "unknown"] {
+                let expected = statisticsFilterRows.filter {
+                    favoriteIDs.contains($0.id)
+                        && (employer == "all" || $0.employer == employer)
+                        && (region == "all" || $0.region == region)
+                }.map(\.id)
+                try await assertStatisticsExport(model, client: client, panel: panel,
+                                                 employer: employer, region: region, expected: expected)
+            }
+        }
+        XCTAssertEqual(panel.names.count, 12)
+        XCTAssertEqual(Set(panel.names).count, 12)
+        XCTAssertTrue(panel.names.allSatisfy { $0.contains("избранное") })
+    }
+
+    @MainActor
+    func testRepeatedStatisticsExportsReplacePriorFilterContentsInSameFile() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let (model, client, panel) = makeStatisticsExportModel(directory: directory)
+        await model.search()
+        for (employer, region, expected) in [
+            ("all", "all", statisticsFilterRows.map(\.id)),
+            ("3529", "subject:1", ["filter-moscow"]),
+            ("2798", "remote", ["filter-remote"]),
+            ("3529", "remote", []),
+            ("all", "unknown", ["filter-unknown"]),
+            ("all", "all", statisticsFilterRows.map(\.id))
+        ] {
+            try await assertStatisticsExport(model, client: client, panel: panel,
+                                             employer: employer, region: region, expected: expected)
+        }
+        XCTAssertEqual(panel.names.first, panel.names.last)
+        XCTAssertFalse(model.isExportingStatisticsPDF)
+    }
+
+    @MainActor
+    func testStatisticsExportCapturesModeRowsAndLabelsBeforeSavePanelChangesFavorites() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let (model, _, panel) = makeStatisticsExportModel(directory: directory)
+        await model.search()
+        model.toggleFavorite(id: "filter-moscow")
+        model.toggleFavorite(id: "filter-remote")
+        model.displayMode = .favorites
+        model.selectedEmployerID = "3529"
+        model.selectedRegionID = "subject:1"
+        panel.onChoose = { [weak model] in
+            guard let model else { return }
+            XCTAssertTrue(model.isExportingStatisticsPDF)
+            XCTAssertFalse(model.canExportStatisticsPDF)
+            XCTAssertFalse(model.canExportFavoritesPDF)
+            model.toggleFavorite(id: "filter-moscow")
+            model.displayMode = .all
+            model.selectedEmployerID = "2798"
+            model.selectedRegionID = "remote"
+        }
+        await model.exportStatisticsPDF()
+        let text = try extractedStatisticsText(XCTUnwrap(PDFDocument(url: XCTUnwrap(panel.destination))))
+        XCTAssertTrue(text.contains("Список: Избранное"))
+        XCTAssertTrue(text.contains("Работодатель: СБЕР"))
+        XCTAssertTrue(text.contains("Регион: Москва"))
+        XCTAssertTrue(text.contains("Вакансия filter-moscow:"))
+        XCTAssertFalse(text.contains("Вакансия filter-remote:"))
+        XCTAssertTrue(panel.names[0].contains("избранное_сбер_москва"))
+        XCTAssertEqual(model.displayedResults.map(\.id), ["filter-remote"])
+        XCTAssertTrue(model.canExportFavoritesPDF)
+    }
+
+    @MainActor
+    func testStatisticsExportEmptyFavoritesWorksWithoutSearch() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let (model, client, panel) = makeStatisticsExportModel(directory: directory)
+        await model.loadPersistenceIfNeeded()
+        model.displayMode = .favorites
+        try await assertStatisticsExport(model, client: client, panel: panel,
+                                         employer: "all", region: "all", expected: [])
+        let requests = await client.searchRequestCount
+        XCTAssertEqual(requests, 0)
+        XCTAssertTrue(panel.names[0].contains("избранное"))
+    }
+
+    @MainActor
+    func testStatisticsExportUnavailableBeforeSearchOrAfterInitialFailure() async {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let (model, _, panel) = makeStatisticsExportModel(directory: directory, mode: .failure)
+        await model.loadPersistenceIfNeeded()
+        await model.exportStatisticsPDF()
+        XCTAssertTrue(panel.names.isEmpty)
+        await model.search()
+        XCTAssertNotNil(model.errorMessage)
+        await model.exportStatisticsPDF()
+        XCTAssertFalse(model.canExportStatisticsPDF)
+        XCTAssertTrue(panel.names.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: panel.destination!.path))
+    }
+
+    @MainActor
+    func testStatisticsExportPersistedFavoritesWithoutNetworkPreservesArchiveAndDates() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let client = MockAPIClient(mode: .failure)
+        let destination = directory.appendingPathComponent("offline.pdf")
+        let records = [statisticsVacancy(id: "offline-old", date: "2026-08-01T10:00:00+0300", archived: true),
+                       statisticsVacancy(id: "offline-new", date: "2026-09-01T10:00:00+0300", salary: true)].map {
+            FavoriteVacancyRecord(result: $0, favoritedAt: .distantPast, updatedAt: .distantPast)
+        }
+        let model = VacancySearchViewModel(
+            apiClient: client,
+            employerStore: TestEmployerStore(entries: [.init(id: "3529", name: "СБЕР", comment: "test")]),
+            areaStore: AreaDirectoryStore(fileURL: directory.appendingPathComponent("areas.json")),
+            favoritesStore: InMemoryFavoriteVacancyStore(favorites: records),
+            statisticsPDFDestination: { _ in destination }
+        )
+        await model.loadPersistenceIfNeeded()
+        model.displayMode = .favorites
+        model.selectedEmployerID = "3529"
+        model.selectedRegionID = "subject:1"
+        await model.exportStatisticsPDF()
+        let text = try extractedStatisticsText(XCTUnwrap(PDFDocument(url: destination)))
+        XCTAssertTrue(text.contains("Всего вакансий: 2"))
+        XCTAssertTrue(text.contains("В архиве: 1"))
+        XCTAssertTrue(text.contains("С указанной зарплатой: 1"))
+        XCTAssertTrue(text.contains("Вакансия offline-new:"))
+        XCTAssertTrue(text.contains("Вакансия offline-old:"))
+        XCTAssertLessThan((text as NSString).range(of: "Вакансия offline-new:").location,
+                          (text as NSString).range(of: "Вакансия offline-old:").location)
+        let searches = await client.searchRequestCount
+        let details = await client.detailRequestCount
+        let attemptedDetails = await client.requestedDetailIDs
+        XCTAssertEqual(searches, 0)
+        XCTAssertEqual(details, 0)
+        XCTAssertTrue(attemptedDetails.isEmpty)
+    }
+
+    @MainActor
+    func testStatisticsExportBlockedDuringRefreshAndUsesExplicitStaleDataAfterFailure() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let (model, client, panel) = makeStatisticsExportModel(directory: directory, mode: .delayedRefreshFailure)
+        await model.search()
+        await client.enableDelayedSearchFailure()
+        let refresh = Task { await model.refreshVacancies() }
+        for _ in 0..<1_000 {
+            if model.isLoading { break }
+            await Task.yield()
+        }
+        XCTAssertTrue(model.isLoading)
+        await model.exportStatisticsPDF()
+        XCTAssertTrue(panel.names.isEmpty)
+        await refresh.value
+        XCTAssertNotNil(model.errorMessage)
+        await model.exportStatisticsPDF()
+        let text = try extractedStatisticsText(XCTUnwrap(PDFDocument(url: XCTUnwrap(panel.destination))))
+        XCTAssertTrue(text.contains("Последнее обновление не завершено"))
+        XCTAssertTrue(text.contains("Всего вакансий: 3"))
+        XCTAssertTrue(model.canExportStatisticsPDF)
+    }
+
+    func testStatisticsFilenameDisambiguatesSameNamesWithDifferentIDsAndModes() {
+        func report(employer: String, region: String, mode: String) -> VacancyStatisticsReport {
+            VacancyStatisticsReport(entries: [], modeName: mode, employerID: employer, employerName: "Одинаковое имя",
+                                    regionID: region, regionName: "Одинаковый регион", createdAt: .distantPast,
+                                    timeZoneIdentifier: "UTC", sourceNote: "")
+        }
+        let names = [report(employer: "1", region: "subject:1", mode: "Все вакансии"),
+                     report(employer: "2", region: "subject:1", mode: "Все вакансии"),
+                     report(employer: "1", region: "subject:2", mode: "Все вакансии"),
+                     report(employer: "1", region: "subject:1", mode: "Избранное")].map(\.fileName)
+        XCTAssertEqual(Set(names).count, 4)
+        XCTAssertTrue(names.allSatisfy { $0.utf8.count <= PDFFileNameBuilder.maximumUTF8Length })
+    }
+
+    func testStatisticsOrderIsStableForEqualInstantsAcrossTimeZones() {
+        let vacancies = [statisticsVacancy(id: "b", date: "2026-09-03T10:00:00+0300"),
+                         statisticsVacancy(id: "a", date: "2026-09-03T07:00:00Z"),
+                         statisticsVacancy(id: "c", date: "2026-09-03T07:00:00.001Z"),
+                         statisticsVacancy(id: "z", date: nil)]
+        XCTAssertEqual(statisticsFixture(vacancies).orderedEntries().map(\.entry.id), ["c", "a", "b", "z"])
+        XCTAssertEqual(statisticsFixture(Array(vacancies.reversed())).orderedEntries().map(\.entry.id), ["c", "a", "b", "z"])
+    }
+
+    func testCancelledStatisticsWorkerPreservesExistingFileAndAllowsRetry() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("report.pdf")
+        let original = Data("original file must survive cancellation".utf8)
+        try original.write(to: url)
+        let worker = PDFExportWorker(fileManager: PDFFileManager(.default))
+        let report = statisticsFixture([statisticsVacancy(id: "retry", date: nil)])
+        let cancelled = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            try await worker.exportStatistics(report: report, destination: url)
+        }
+        do { try await cancelled.value; XCTFail("Expected cancellation") }
+        catch is CancellationError { }
+        XCTAssertEqual(try Data(contentsOf: url), original)
+        try await worker.exportStatistics(report: report, destination: url)
+        XCTAssertTrue(try extractedStatisticsText(XCTUnwrap(PDFDocument(url: url))).contains("Вакансия retry:"))
+    }
+
+    private var statisticsFilterRows: [(id: String, employer: String, region: String)] {
+        [("filter-moscow", "3529", "subject:1"), ("filter-ekb", "3529", "subject:66"),
+         ("filter-unknown", "3529", "unknown"), ("filter-remote", "2798", "remote"),
+         ("filter-spb", "9999", "subject:2")]
+    }
+
+    @MainActor
+    private final class StatisticsDestinationSpy {
+        var destination: URL?
+        var names: [String] = []
+        var onChoose: (() -> Void)?
+        init(destination: URL) { self.destination = destination }
+        func choose(_ name: String) -> URL? {
+            names.append(name)
+            onChoose?()
+            return destination
+        }
+    }
+
+    @MainActor
+    private func makeStatisticsExportModel(directory: URL, mode: MockAPIClient.Mode = .filters)
+        -> (VacancySearchViewModel, MockAPIClient, StatisticsDestinationSpy) {
+        let client = MockAPIClient(mode: mode)
+        let panel = StatisticsDestinationSpy(destination: directory.appendingPathComponent("report.pdf"))
+        let model = VacancySearchViewModel(
+            apiClient: client,
+            employerStore: TestEmployerStore(entries: [
+                .init(id: "3529", name: "СБЕР", comment: "test"),
+                .init(id: "2798", name: "СберРешения", comment: "test"),
+                .init(id: "9999", name: "Альфа Банк", comment: "test")
+            ]),
+            areaStore: AreaDirectoryStore(fileURL: directory.appendingPathComponent("areas.json")),
+            statisticsPDFDestination: panel.choose,
+            currentDate: { Date(timeIntervalSince1970: 1_788_400_000) }
+        )
+        return (model, client, panel)
+    }
+
+    @MainActor
+    private func assertStatisticsExport(_ model: VacancySearchViewModel, client: MockAPIClient,
+                                        panel: StatisticsDestinationSpy, employer: String, region: String,
+                                        expected: [String], file: StaticString = #filePath, line: UInt = #line) async throws {
+        model.selectedEmployerID = employer
+        model.selectedRegionID = region
+        let snapshot = model.statisticsReportSnapshot()
+        let context = "\(model.displayMode.rawValue) / \(employer) / \(region)"
+        XCTAssertEqual(Set(snapshot.entries.map(\.id)), Set(expected), context, file: file, line: line)
+        let beforeSearch = await client.searchRequestCount
+        let beforeDetails = await client.detailRequestCount
+        await model.exportStatisticsPDF()
+        let pdf = try XCTUnwrap(PDFDocument(url: XCTUnwrap(panel.destination)), context, file: file, line: line)
+        let text = try extractedStatisticsText(pdf)
+        XCTAssertGreaterThan(pdf.pageCount, 0, context, file: file, line: line)
+        XCTAssertTrue(text.contains("Всего вакансий: \(expected.count)"), context, file: file, line: line)
+        XCTAssertTrue(text.contains("Список: \(snapshot.modeName)"), context, file: file, line: line)
+        XCTAssertTrue(text.contains("Работодатель: \(snapshot.employerName)"), context, file: file, line: line)
+        XCTAssertTrue(text.contains("Регион: \(snapshot.regionName)"), context, file: file, line: line)
+        let expectedRows = statisticsFilterRows.filter { expected.contains($0.id) }
+        XCTAssertTrue(text.contains("Работодателей: \(Set(expectedRows.map(\.employer)).count)"), context, file: file, line: line)
+        XCTAssertTrue(text.contains("Регионов / территориальных групп: \(Set(expectedRows.map(\.region)).count)"), context, file: file, line: line)
+        for row in statisticsFilterRows {
+            XCTAssertEqual(text.contains("Вакансия \(row.id):"), expected.contains(row.id), context, file: file, line: line)
+        }
+        // Fixture 3529 was published a day later than the other employers.
+        let expectedOrder = expectedRows.sorted {
+            if ($0.employer == "3529") != ($1.employer == "3529") { return $0.employer == "3529" }
+            return $0.id < $1.id
+        }
+        var previousPosition = -1
+        for row in expectedOrder {
+            let position = (text as NSString).range(of: "Вакансия \(row.id):").location
+            XCTAssertNotEqual(position, NSNotFound, context, file: file, line: line)
+            XCTAssertGreaterThan(position, previousPosition, context, file: file, line: line)
+            previousPosition = position
+        }
+        XCTAssertEqual(panel.names.last, snapshot.fileName, context, file: file, line: line)
+        XCTAssertFalse(model.isExportingStatisticsPDF, context, file: file, line: line)
+        XCTAssertTrue(model.statisticsPDFExportMessage?.contains("сохранён: \(expected.count)") == true, context, file: file, line: line)
+        let afterSearch = await client.searchRequestCount
+        let afterDetails = await client.detailRequestCount
+        XCTAssertEqual(afterSearch, beforeSearch, context, file: file, line: line)
+        XCTAssertEqual(afterDetails, beforeDetails, context, file: file, line: line)
+    }
+
+    private func extractedStatisticsText(_ pdf: PDFDocument) throws -> String {
+        // macOS 13 Quartz/PDFKit can expose the shared SF glyph for Cyrillic к as kra.
+        // Exact original Unicode is checked separately on the attributed page sequence.
+        try XCTUnwrap(pdf.string).replacingOccurrences(of: "\u{0138}", with: "к")
+            .precomposedStringWithCanonicalMapping
+    }
+
+    private func statisticsFixture(_ vacancies: [VacancySearchResult]) -> VacancyStatisticsReport {
+        VacancyStatisticsReport(
+            entries: vacancies.map(VacancyStatisticsReport.Entry.init), modeName: "Все вакансии",
+            employerID: "3529", employerName: "СБЕР", regionID: "subject:1", regionName: "Москва",
+            createdAt: Date(timeIntervalSince1970: 1_788_400_000), timeZoneIdentifier: "UTC", sourceNote: "Локальная выборка."
+        )
+    }
+
+    private func statisticsVacancy(id: String, date: String?, salary: Bool = false, archived: Bool = false) -> VacancySearchResult {
+        let summary = HHVacancySummary(
+            id: id, name: "Вакансия \(id)", employer: .init(name: "СБЕР", id: "3529"),
+            salary: salary ? .init(from: 100_000, to: nil, currency: "RUR", gross: false) : nil,
+            area: .init(id: "1", name: "Москва"), alternateURL: nil, url: nil, snippet: nil, publishedAt: date
+        )
+        return VacancySearchResult(
+            id: id, summary: summary,
+            details: .init(id: id, name: summary.name, employer: summary.employer, area: summary.area,
+                           salary: summary.salary, alternateURL: nil, description: nil, archived: archived),
+            location: .subject(id: "1", name: "Москва", cityID: "1", cityName: "Москва")
+        )
+    }
+
+    func testPublicationDateParserPreservesOffsetsFractionsAndMissingValues() throws {
+        let parser = HHPublicationDateParser()
+        let whole = try XCTUnwrap(parser.date(from: "2026-09-01T10:00:00Z"))
+        for date in ["2026-09-01T13:00:00+0300", "2026-09-01T13:00:00+03:00", "2026-09-01T10:00:00.000Z"] {
+            XCTAssertEqual(parser.date(from: date), whole)
+        }
+        let fraction = try XCTUnwrap(parser.date(from: "2026-09-01T10:00:00.125Z"))
+        XCTAssertEqual(fraction.timeIntervalSince(whole), 0.125, accuracy: 0.0001)
+        for date: String? in [nil, "", "not-a-date"] { XCTAssertNil(parser.date(from: date)) }
+    }
+
+    @MainActor
+    func testFavoritesAndStatisticsAgreeOnFractionalPublicationChronology() async {
+        let rows = [
+            statisticsVacancy(id: "standard", date: "2026-09-01T10:00:00Z"),
+            statisticsVacancy(id: "newest", date: "2026-09-03T13:00:00.125+0300"),
+            statisticsVacancy(id: "middle", date: "2026-09-02T10:00:00.900Z"),
+            statisticsVacancy(id: "missing", date: nil)
+        ]
+        let records = rows.map { FavoriteVacancyRecord(result: $0, favoritedAt: Date(), updatedAt: Date()) }
+        let model = VacancySearchViewModel(apiClient: PDFEnrichmentClient(),
+            employerStore: TestEmployerStore(entries: []), favoritesStore: InMemoryFavoriteVacancyStore(favorites: records))
+        await model.loadPersistenceIfNeeded()
+        model.displayMode = .favorites
+        let expected = ["newest", "middle", "standard", "missing"]
+        XCTAssertEqual(model.displayedResults.map(\.id), expected)
+        XCTAssertEqual(model.statisticsReportSnapshot().orderedEntries().map(\.entry.id), expected)
+    }
+
+    @MainActor
+    func testSearchOrdersFractionalDatesBeforeOlderWholeSecondDates() async {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let rows = [statisticsVacancy(id: "old", date: "2026-09-01T10:00:00Z"),
+                    statisticsVacancy(id: "new", date: "2026-09-01T10:00:00.900Z")]
+        let model = VacancySearchViewModel(apiClient: FixedSummaryAPIClient(rows: rows.map(\.summary)),
+            employerStore: TestEmployerStore(entries: [.init(id: "3529", name: "СБЕР", comment: "test")]),
+            areaStore: AreaDirectoryStore(fileURL: directory.appendingPathComponent("areas.json")))
+        await model.search()
+        XCTAssertNil(model.errorMessage)
+        XCTAssertEqual(model.results.map(\.id), ["new", "old"])
+    }
+
+    @MainActor
+    func testFavoritePDFSnapshotKeepsLocalStateWhileArchiveChecksUpdateFavorites() async {
+        let blocked = expectation(description: "enrichment suspended")
+        let client = SuspendedEnrichmentClient(onFirstRequest: { blocked.fulfill() })
+        let exporter = PDFEnrichmentExporter()
+        let model = await snapshotExportModel(client: client, exporter: exporter)
+        let export = Task { await model.exportFavoriteVacanciesPDF() }
+        await fulfillment(of: [blocked], timeout: 2)
+        await model.checkArchiveStatusesIfNeeded()
+        XCTAssertTrue(model.favorites.allSatisfy(\.isArchived))
+        await client.resumeFirstRequest()
+        await export.value
+        XCTAssertEqual(exporter.snapshots.count, 1)
+        XCTAssertEqual(exporter.snapshots.first?.map(\.id), ["pending", "full"])
+        XCTAssertEqual(exporter.snapshots.first?.map(\.isArchived), [false, false])
+        await model.waitForPendingFavoritesSaves()
+    }
+
+    @MainActor
+    func testFavoritePDFProgressAndMembershipRemainStableWhenFavoriteIsRemoved() async {
+        let blocked = expectation(description: "enrichment suspended")
+        let client = SuspendedEnrichmentClient(onFirstRequest: { blocked.fulfill() })
+        let exporter = PDFEnrichmentExporter()
+        let model = await snapshotExportModel(client: client, exporter: exporter)
+        exporter.onExport = { [weak model] in
+            XCTAssertEqual(model?.favoritesPDFExportProgress, .init(completedVacancies: 2, totalVacancies: 2))
+        }
+        let export = Task { await model.exportFavoriteVacanciesPDF() }
+        await fulfillment(of: [blocked], timeout: 2)
+        model.toggleFavorite(id: "pending")
+        XCTAssertEqual(model.favorites.count, 1)
+        await client.resumeFirstRequest()
+        await export.value
+        XCTAssertEqual(exporter.snapshots.first?.map(\.id), ["pending", "full"])
+        XCTAssertFalse(model.isExportingFavoritesPDF)
+        await model.waitForPendingFavoritesSaves()
+    }
+
+    @MainActor
+    private func snapshotExportModel(client: SuspendedEnrichmentClient, exporter: PDFEnrichmentExporter) async -> VacancySearchViewModel {
+        let pending = FavoriteVacancyRecord(result: statisticsVacancy(id: "pending", date: nil),
+            favoritedAt: Date(timeIntervalSince1970: 2), updatedAt: Date())
+        let full = FavoriteVacancyRecord(result: makePDFVacancy(id: "full"),
+            favoritedAt: Date(timeIntervalSince1970: 1), updatedAt: Date())
+        let model = VacancySearchViewModel(apiClient: client, employerStore: TestEmployerStore(entries: []),
+            favoritesStore: InMemoryFavoriteVacancyStore(favorites: [pending, full]), favoritePDFExporter: exporter)
+        await model.loadPersistenceIfNeeded()
+        model.displayMode = .favorites
+        return model
+    }
+
+    @MainActor
+    func testLargePDFPreparationAllowsFilterChangesAndInteractiveHHDetails() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let (model, client, _) = makeStatisticsExportModel(directory: directory)
+        await model.search()
+        let initialSearchRequests = await client.searchRequestCount
+        let worker = PDFExportWorker(fileManager: PDFFileManager(.default))
+        let snapshot = PDFVacanciesSnapshot(values: (0..<100).map { makePDFVacancy(id: "joint-\($0)") })
+        var completed = 0
+        let preparation = Task {
+            try await worker.prepare(vacancies: snapshot) { completed = $0.completedVacancies }
+        }
+        var interactionsDuringPDF = 0
+        for index in 0..<20 {
+            if completed < 100 { interactionsDuringPDF += 1 }
+            model.selectedEmployerID = index.isMultiple(of: 2) ? "3529" : "all"
+            model.selectedRegionID = index.isMultiple(of: 2) ? "subject:1" : "all"
+            XCTAssertEqual(model.displayedResults.count, index.isMultiple(of: 2) ? 1 : 5)
+            await model.loadVacancyDetails(id: index.isMultiple(of: 2) ? "filter-moscow" : "filter-ekb")
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        let prepared = try await preparation.value
+        XCTAssertGreaterThan(interactionsDuringPDF, 1)
+        XCTAssertEqual(prepared.pageCount, 100)
+        XCTAssertEqual(completed, 100)
+        let details = await client.requestedDetailIDs
+        let searches = await client.searchRequestCount
+        XCTAssertEqual(details, ["filter-moscow", "filter-ekb"])
+        XCTAssertEqual(searches, initialSearchRequests)
+        await worker.discardPreparedExport()
+        await model.refreshVacancies()
+        XCTAssertNil(model.errorMessage)
+        XCTAssertEqual(model.displayedResults.count, 5)
+    }
+
+    @MainActor
+    func testRepeatedFavoritePDFEnrichmentReusesSessionDetailsWithoutChangingSnapshot() async {
+        let client = PDFEnrichmentClient()
+        let exporter = PDFEnrichmentExporter()
+        let model = await enrichmentModel(client: client, exporter: exporter)
+        await model.exportFavoriteVacanciesPDF()
+        let firstCount = await client.requests
+        XCTAssertEqual(firstCount, 3)
+        await client.setError(HHAPIError.rateLimited(retryAfterSeconds: 60))
+        await model.exportFavoriteVacanciesPDF()
+        let repeatedCount = await client.requests
+        XCTAssertEqual(repeatedCount, firstCount)
+        XCTAssertEqual(exporter.snapshots.count, 2)
+        XCTAssertEqual(exporter.snapshots[0].map(\.id), exporter.snapshots[1].map(\.id))
+        XCTAssertEqual(exporter.snapshots[0].map(\.details), exporter.snapshots[1].map(\.details))
+        XCTAssertTrue(exporter.snapshots[1].allSatisfy { $0.isDetailLoaded && $0.exportDataNotice == nil })
+    }
+
+    @MainActor
+    func testFailedFavoritePDFEnrichmentIsNotCachedAndCanRecover() async {
+        let client = PDFEnrichmentClient(error: URLError(.timedOut))
+        let exporter = PDFEnrichmentExporter()
+        let model = await enrichmentModel(client: client, exporter: exporter)
+        await model.exportFavoriteVacanciesPDF()
+        await client.setError(nil)
+        await model.exportFavoriteVacanciesPDF()
+        let count = await client.requests
+        XCTAssertEqual(count, 6)
+        XCTAssertTrue(exporter.snapshots[0].allSatisfy { $0.exportDataNotice != nil })
+        XCTAssertTrue(exporter.snapshots[1].allSatisfy { $0.isDetailLoaded && $0.exportDataNotice == nil })
+    }
+
+    @MainActor
+    func testFavoritePDFEnrichmentStopsOnAccessRestrictionsAndAllowsRetry() async {
+        let errors: [HHAPIError] = [.unauthorized, .forbidden(requestID: "test"),
+            .rateLimited(retryAfterSeconds: 60), .captchaRequired(requestID: "test"),
+            .missingApplicationToken, .placeholderApplicationToken]
+        for error in errors {
+            let client = PDFEnrichmentClient(error: error)
+            let exporter = PDFEnrichmentExporter()
+            let model = await enrichmentModel(client: client, exporter: exporter)
+            await model.exportFavoriteVacanciesPDF()
+            let stoppedCount = await client.requests
+            XCTAssertEqual(stoppedCount, 1, "\(error)")
+            XCTAssertEqual(exporter.snapshots.count, 0, "Restricted export must not be presented as complete")
+            XCTAssertFalse(model.isExportingFavoritesPDF)
+            XCTAssertNil(model.favoritesPDFExportProgress)
+            XCTAssertTrue(model.canExportFavoritesPDF)
+            XCTAssertTrue(model.statusMessage?.contains(error.localizedDescription) == true)
+            await client.setError(nil)
+            await model.exportFavoriteVacanciesPDF()
+            let retryCount = await client.requests
+            XCTAssertEqual(retryCount, 4)
+            XCTAssertEqual(exporter.snapshots.count, 1)
+            XCTAssertEqual(exporter.snapshots.first?.count, 3)
+        }
+    }
+
+    @MainActor
+    func testFavoritePDFEnrichmentPropagatesCancellationWithoutPublishing() async {
+        let client = PDFEnrichmentClient(error: CancellationError())
+        let exporter = PDFEnrichmentExporter()
+        let model = await enrichmentModel(client: client, exporter: exporter)
+        await model.exportFavoriteVacanciesPDF()
+        let count = await client.requests
+        XCTAssertEqual(count, 1)
+        XCTAssertTrue(exporter.snapshots.isEmpty)
+        XCTAssertFalse(model.isExportingFavoritesPDF)
+        XCTAssertNil(model.favoritesPDFExportProgress)
+        XCTAssertEqual(model.statusMessage, "Сохранение избранного в PDF отменено.")
+    }
+
+    @MainActor
+    func testFavoritePDFEnrichmentTaskCancellationStopsInFlightAndAllowsNextExport() async throws {
+        let client = PDFEnrichmentClient(delay: 300_000_000)
+        let exporter = PDFEnrichmentExporter()
+        let model = await enrichmentModel(client: client, exporter: exporter)
+        let task = Task { await model.exportFavoriteVacanciesPDF() }
+        for _ in 0..<1000 {
+            if await client.requests == 1 { break }
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        task.cancel()
+        await task.value
+        let count = await client.requests
+        XCTAssertEqual(count, 1)
+        XCTAssertTrue(exporter.snapshots.isEmpty)
+        XCTAssertTrue(model.canExportFavoritesPDF)
+        await client.setDelay(0)
+        await model.exportFavoriteVacanciesPDF()
+        XCTAssertEqual(exporter.snapshots.count, 1)
+    }
+
+    @MainActor
+    func testFavoritePDFRecoverableErrorsRetainExplicitLocalFallbackForEveryRow() async {
+        for error in [HHAPIError.requestFailed(statusCode: 404, message: nil) as Error, URLError(.timedOut)] {
+            let client = PDFEnrichmentClient(error: error)
+            let exporter = PDFEnrichmentExporter()
+            let model = await enrichmentModel(client: client, exporter: exporter)
+            await model.exportFavoriteVacanciesPDF()
+            let count = await client.requests
+            XCTAssertEqual(count, 3)
+            XCTAssertEqual(exporter.snapshots.first?.count, 3)
+            XCTAssertTrue(exporter.snapshots.first?.allSatisfy { $0.exportDataNotice != nil } == true)
+        }
+    }
+
+    @MainActor
+    func testFavoritePDFWithPersistedDetailsDoesNotEnrichAgain() async {
+        let client = PDFEnrichmentClient(error: HHAPIError.rateLimited(retryAfterSeconds: 60))
+        let exporter = PDFEnrichmentExporter()
+        let records = (0..<3).map {
+            FavoriteVacancyRecord(result: makePDFVacancy(id: "\($0)"), favoritedAt: Date(), updatedAt: Date())
+        }
+        let model = VacancySearchViewModel(apiClient: client, employerStore: TestEmployerStore(entries: []),
+            favoritesStore: InMemoryFavoriteVacancyStore(favorites: records), favoritePDFExporter: exporter)
+        await model.loadPersistenceIfNeeded()
+        await model.exportFavoriteVacanciesPDF()
+        let count = await client.requests
+        XCTAssertEqual(count, 0)
+        XCTAssertEqual(exporter.snapshots.first?.count, 3)
+    }
+
+    @MainActor
+    private func enrichmentModel(client: PDFEnrichmentClient, exporter: PDFEnrichmentExporter) async -> VacancySearchViewModel {
+        let records = (0..<3).map {
+            FavoriteVacancyRecord(result: statisticsVacancy(id: "\($0)", date: "2026-09-01T10:00:00Z"),
+                favoritedAt: Date(timeIntervalSince1970: Double($0)), updatedAt: Date())
+        }
+        let model = VacancySearchViewModel(apiClient: client, employerStore: TestEmployerStore(entries: []),
+            favoritesStore: InMemoryFavoriteVacancyStore(favorites: records), favoritePDFExporter: exporter)
+        await model.loadPersistenceIfNeeded()
+        return model
+    }
+
+    private func makePDFVacancy(id: String) -> VacancySearchResult {
+        let vacancy = summary(id: id, areaID: "1", areaName: "Москва")
+        return VacancySearchResult(
+            id: vacancy.id,
+            summary: vacancy,
+            details: .init(
+                id: vacancy.id,
+                name: "Инженер надёжности \(id)",
+                employer: vacancy.employer,
+                area: vacancy.area,
+                salary: nil,
+                alternateURL: "https://hh.ru/vacancy/\(id)",
+                description: "<p>Кириллица, Unicode и длинная строка: надёжность-производительность-HeadHunter-PDF.</p>",
+                archived: false,
+                keySkills: [.init(name: "Swift"), .init(name: "macOS")]
+            ),
+            location: .subject(id: "1", name: "Москва", cityID: "1", cityName: "Москва"),
+            isDetailLoaded: true
+        )
+    }
+
     private func temporaryDirectory() -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("HHVacancySberTests-\(UUID().uuidString)", isDirectory: true)
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
@@ -843,10 +2155,36 @@ private struct TestEmployerStore: EmployerConfigurationStoring {
     }
 }
 
+private struct CancelledAreaClient: HHVacancyAPIClient {
+    var responseGate: TestAsyncSignal? = nil
+    var onRequest: @Sendable () -> Void = {}
+    func validateVacanciesAccess() throws {}
+    func areaTree() async throws -> HHAreaNode {
+        onRequest()
+        if let responseGate {
+            await responseGate.wait()
+            return .init(id: "113", name: "Россия", areas: [.init(id: "1", name: "Москва")])
+        }
+        throw CancellationError()
+    }
+    func searchVacancies(_ request: HHVacancySearchRequest) async throws -> HHVacancySearchResponse {
+        XCTFail("Search must not follow a cancelled area request")
+        throw CancellationError()
+    }
+    func vacancyDetails(id: String) async throws -> HHVacancyDetails {
+        XCTFail("Unexpected detail request")
+        throw CancellationError()
+    }
+    func vacancyDictionaries() async throws -> HHVacancyDictionaries {
+        XCTFail("Unexpected dictionary request")
+        throw CancellationError()
+    }
+}
+
 private actor MockAPIClient: HHVacancyAPIClient {
     enum Mode: Sendable {
         case simple, partitioned, mismatch, failure, delayedArchive, archiveNotFound
-        case archiveRecoverableFailure, archiveTerminalFailure, delayedRefreshFailure, filters
+        case archiveRecoverableFailure, archiveTerminalFailure, archiveCancelled, delayedRefreshFailure, filters
     }
     let mode: Mode
     private(set) var detailRequestCount = 0
@@ -874,6 +2212,7 @@ private actor MockAPIClient: HHVacancyAPIClient {
     }
     func vacancyDetails(id: String) async throws -> HHVacancyDetails {
         requestedDetailIDs.append(id)
+        if case .archiveCancelled = mode, id.hasSuffix("cancel") { throw CancellationError() }
         if case .failure = mode { throw URLError(.notConnectedToInternet) }
         if case .archiveRecoverableFailure = mode, id.hasSuffix("fail") {
             throw URLError(.timedOut)
@@ -888,13 +2227,24 @@ private actor MockAPIClient: HHVacancyAPIClient {
         if case .delayedArchive = mode {
             try await Task.sleep(nanoseconds: 100_000_000)
         }
-        let employerID = id.components(separatedBy: "-").first ?? "3529"
+        let employerID: String
+        if case .filters = mode {
+            // Search IDs use the "filter-" prefix, not the employer ID.
+            switch id {
+            case "filter-remote": employerID = "2798"
+            case "filter-spb": employerID = "9999"
+            default: employerID = "3529"
+            }
+        } else {
+            employerID = id.components(separatedBy: "-").first ?? "3529"
+        }
         let archived: Bool
         switch mode {
-        case .archiveNotFound, .archiveRecoverableFailure, .archiveTerminalFailure: archived = true
+        case .archiveNotFound, .archiveRecoverableFailure, .archiveTerminalFailure, .archiveCancelled: archived = true
         default: archived = false
         }
-        return .init(id: id, name: "Вакансия \(id)", employer: .init(name: employerID == "2798" ? "СберРешения" : "СБЕР", id: employerID),
+        let employerName = employerID == "2798" ? "СберРешения" : employerID == "9999" ? "Альфа Банк" : "СБЕР"
+        return .init(id: id, name: "Вакансия \(id)", employer: .init(name: employerName, id: employerID),
                      area: .init(id: "1", name: "Москва"), salary: nil, alternateURL: nil,
                      description: "<p>Полное описание</p>", archived: archived)
     }
@@ -920,7 +2270,7 @@ private actor MockAPIClient: HHVacancyAPIClient {
                 values = [makeSummary(id: "filter-spb", employerID: "9999", employerName: "Альфа Банк", areaID: "2", areaName: "Санкт-Петербург")]
             }
             return page(values, found: values.count, request: request)
-        case .simple, .delayedArchive, .archiveNotFound, .archiveRecoverableFailure, .archiveTerminalFailure,
+        case .simple, .delayedArchive, .archiveNotFound, .archiveRecoverableFailure, .archiveTerminalFailure, .archiveCancelled,
              .delayedRefreshFailure:
             let remote = request.employerID == "2798"
             let item = makeSummary(id: "\(request.employerID)-vacancy", employerID: request.employerID,
@@ -969,6 +2319,83 @@ private actor MockAPIClient: HHVacancyAPIClient {
 
 private struct FixedTokenProvider: HHAccessTokenProviding {
     let accessToken: String? = "unit-token"
+}
+
+@MainActor
+private final class PDFEnrichmentExporter: FavoriteVacanciesPDFExporting {
+    var snapshots: [[VacancySearchResult]] = []
+    var onExport: (() -> Void)?
+    func export(vacancies: [VacancySearchResult], progress: @escaping @MainActor @Sendable (FavoritePDFExportProgress) -> Void) async throws -> FavoritePDFExportOutcome {
+        onExport?()
+        snapshots.append(vacancies)
+        return .cancelled
+    }
+}
+
+private actor SuspendedEnrichmentClient: HHVacancyAPIClient {
+    private var requests = 0
+    private let resume = TestAsyncSignal()
+    private let onFirstRequest: @Sendable () -> Void
+    init(onFirstRequest: @escaping @Sendable () -> Void) { self.onFirstRequest = onFirstRequest }
+    nonisolated func validateVacanciesAccess() throws {}
+    func resumeFirstRequest() async { await resume.signal() }
+    func vacancyDetails(id: String) async throws -> HHVacancyDetails {
+        requests += 1
+        if requests == 1 {
+            onFirstRequest()
+            await resume.wait()
+            throw URLError(.timedOut)
+        }
+        return .init(id: id, name: "Вакансия \(id)", employer: nil, area: nil,
+            salary: nil, alternateURL: nil, description: nil, archived: true)
+    }
+    func searchVacancies(_ request: HHVacancySearchRequest) async throws -> HHVacancySearchResponse {
+        XCTFail("Unexpected search"); throw HHAPIError.invalidResponse
+    }
+    func areaTree() async throws -> HHAreaNode { XCTFail("Unexpected areas"); throw HHAPIError.invalidResponse }
+    func vacancyDictionaries() async throws -> HHVacancyDictionaries { XCTFail("Unexpected dictionaries"); throw HHAPIError.invalidResponse }
+}
+
+private struct FixedSummaryAPIClient: HHVacancyAPIClient {
+    let rows: [HHVacancySummary]
+    func validateVacanciesAccess() throws {}
+    func searchVacancies(_ request: HHVacancySearchRequest) async throws -> HHVacancySearchResponse {
+        .init(items: rows, found: rows.count, pages: 1, page: 0, perPage: request.perPage)
+    }
+    func areaTree() async throws -> HHAreaNode { .init(id: "113", name: "Россия", areas: [.init(id: "1", name: "Москва")]) }
+    func vacancyDictionaries() async throws -> HHVacancyDictionaries { .init(experience: [], workFormat: [], schedule: []) }
+    func vacancyDetails(id: String) async throws -> HHVacancyDetails {
+        XCTFail("Search must not enrich"); throw HHAPIError.invalidResponse
+    }
+}
+
+private actor PDFEnrichmentClient: HHVacancyAPIClient {
+    var requests = 0
+    private var error: Error?
+    private var delay: UInt64
+    init(error: Error? = nil, delay: UInt64 = 0) { self.error = error; self.delay = delay }
+    func setError(_ error: Error?) { self.error = error }
+    func setDelay(_ delay: UInt64) { self.delay = delay }
+    nonisolated func validateVacanciesAccess() throws {}
+    func vacancyDetails(id: String) async throws -> HHVacancyDetails {
+        requests += 1
+        if delay > 0 { try await Task.sleep(nanoseconds: delay) }
+        if let error { throw error }
+        return .init(id: id, name: "Вакансия \(id)", employer: nil, area: nil, salary: nil,
+            alternateURL: nil, description: "<p>Полные данные \(id)</p>")
+    }
+    func searchVacancies(_ request: HHVacancySearchRequest) async throws -> HHVacancySearchResponse {
+        XCTFail("PDF must not search"); throw HHAPIError.invalidResponse
+    }
+    func areaTree() async throws -> HHAreaNode { XCTFail("PDF must not load areas"); throw HHAPIError.invalidResponse }
+    func vacancyDictionaries() async throws -> HHVacancyDictionaries { XCTFail("PDF must not load dictionaries"); throw HHAPIError.invalidResponse }
+}
+
+private actor TestAsyncSignal {
+    private var signalled = false
+    private var waiter: CheckedContinuation<Void, Never>?
+    func wait() async { if !signalled { await withCheckedContinuation { waiter = $0 } } }
+    func signal() { signalled = true; waiter?.resume(); waiter = nil }
 }
 
 private actor ConcurrentOperationTracker {
