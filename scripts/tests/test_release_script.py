@@ -811,6 +811,52 @@ class ReleaseScriptTests(unittest.TestCase):
             completed = self.invoke_helper("verify_exact_payload_root", root)
             self.assertNotEqual(0, completed.returncode)
 
+    def test_macos_fsevents_metadata_is_removed_without_weakening_payload_contract(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "mounted"
+            root.mkdir()
+            self.create_staging_payload(root)
+            (root / "RELEASE-MANIFEST.json").write_text("{}\n", encoding="utf-8")
+            metadata = root / ".fseventsd"
+            metadata.mkdir()
+            (metadata / "fseventsd-uuid").write_text("fixture\n", encoding="utf-8")
+
+            contaminated = self.invoke_helper(
+                "release_python",
+                "exact-entries",
+                root,
+                "СберВакансии.app",
+                "Applications",
+                "README.txt",
+                "RELEASE-MANIFEST.json",
+            )
+            self.assertNotEqual(0, contaminated.returncode)
+
+            removed = self.invoke_helper(
+                "release_python", "remove-fseventsd", root
+            )
+            self.assertEqual(0, removed.returncode, removed.stderr)
+            self.assertFalse(metadata.exists())
+            exact = self.invoke_helper(
+                "release_python",
+                "exact-entries",
+                root,
+                "СберВакансии.app",
+                "Applications",
+                "README.txt",
+                "RELEASE-MANIFEST.json",
+            )
+            self.assertEqual(0, exact.returncode, exact.stderr)
+
+            metadata.mkdir()
+            nested = metadata / "unexpected"
+            nested.mkdir()
+            refused = self.invoke_helper(
+                "release_python", "remove-fseventsd", root
+            )
+            self.assertNotEqual(0, refused.returncode)
+            self.assertTrue(nested.is_dir())
+
     def test_dmg_readme_is_deterministic_utf8_plain_text_with_required_sections(self):
         expected = (
             "СберВакансии\n"

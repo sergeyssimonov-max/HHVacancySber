@@ -292,6 +292,49 @@ def exact_entries(root, expected):
     print("ROOT_HIDDEN_ENTRIES=" + ",".join(hidden))
 
 
+def remove_fseventsd(root):
+    root_path = Path(root)
+    metadata = root_path / ".fseventsd"
+    try:
+        root_info = os.lstat(root_path)
+    except OSError as error:
+        fail("unable to inspect mounted payload root: " + str(error))
+    if stat.S_ISLNK(root_info.st_mode) or not stat.S_ISDIR(root_info.st_mode):
+        fail("mounted payload root is not a real directory")
+    try:
+        metadata_info = os.lstat(metadata)
+    except FileNotFoundError:
+        print("FSEVENTSD_METADATA=absent")
+        return
+    except OSError as error:
+        fail("unable to inspect .fseventsd: " + str(error))
+    if stat.S_ISLNK(metadata_info.st_mode) or not stat.S_ISDIR(metadata_info.st_mode):
+        fail(".fseventsd is not a real directory")
+
+    flags = os.O_RDONLY | os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(metadata, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (metadata_info.st_dev, metadata_info.st_ino):
+            fail(".fseventsd identity changed before cleanup")
+        names = []
+        with os.scandir(descriptor) as entries:
+            for entry in entries:
+                info = entry.stat(follow_symlinks=False)
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    fail("unsupported .fseventsd entry: " + entry.name)
+                names.append(entry.name)
+        for name in names:
+            os.unlink(name, dir_fd=descriptor)
+    finally:
+        os.close(descriptor)
+    os.rmdir(metadata)
+    print("FSEVENTSD_METADATA=removed")
+    print("FSEVENTSD_FILE_COUNT=%d" % len(names))
+
+
 def exact_root(root):
     exact_entries(
         root,
@@ -948,6 +991,8 @@ elif command == "manifest-verify":
     verify_manifest(*arguments)
 elif command == "exact-entries":
     exact_entries(arguments[0], arguments[1:])
+elif command == "remove-fseventsd":
+    remove_fseventsd(arguments[0])
 elif command == "exact-root":
     exact_root(arguments[0])
 elif command == "snapshot":
@@ -2954,6 +2999,8 @@ main() {
   release_python writable-diskinfo-check \
     "$diskinfo_plist" "$RELEASE_ATTACHED_DEVICE" "$writable_mount" \
     > "$RELEASE_LOG_DIR/writable-diskutil-validation.txt"
+  release_python remove-fseventsd "$writable_mount" \
+    > "$RELEASE_LOG_DIR/writable-fseventsd-cleanup.txt"
   release_python exact-entries \
     "$writable_mount" \
     СберВакансии.app Applications README.txt RELEASE-MANIFEST.json \
