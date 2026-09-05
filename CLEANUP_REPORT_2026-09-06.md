@@ -8,13 +8,13 @@
 без трех локальных коммитов и незакоммиченных изменений основной рабочей копии.
 Удалять ветки, теги, выпуски, PR или Actions artifacts оснований не найдено; необратимых облачных действий нет.
 
-Финальная приемка еще выполняется. Это предварительный отчет; отсутствие результата не считается успешной проверкой.
+Финальная приемка: Локальная приемка прошла: 106 модульных тестов (6 штатных пропусков), 13 UI, 72 Python; Debug/Release build/analyze успешны. Два CI-запуска первого коммита отчета прошли. После обновления отчета проверяется CI окончательного head.
 
 ## 2. Мера локально и в облаке с пояснением разницы
 
 Удаленные кеши занимали 2,37 ГиБ. Это сумма выделенных блоков выбранных каталогов, а не обещание такого же изменения свободного места APFS: снапшоты, сжатие и параллельная работа ОС могут влиять на `df`.
 Исходный `df -h`: 460 GiB всего, 282 GiB использовано, 138 GiB доступно.
-Новые DerivedData для приемки и карантин частично занимают освобожденное место; итог приведен после завершения.
+Новые DerivedData для приемки и карантин частично занимают освобожденное место; итоговый спад по учтенным временным путям — 2194.261 МиБ (около 2,14 ГиБ), без учета небольшого карантина. Служебный worktree и новые проверочные DerivedData включены в эту разницу.
 
 | Отслеживаемые файлы рабочего дерева | Файлов | Байтов | Переводов строки |
 |---|---:|---:|---:|
@@ -222,10 +222,10 @@ Release build/analyze — успешно; Python — 72, OK; git diff --check, b
 
 | Проверка / полное время команды, с | До | После |
 |---|---:|---:|
-| Debug unit + build + analyze | 32.85 | [НЕ ВЫПОЛНЕНО] |
-| Полный Debug test с UI | 193.24 | [НЕ ВЫПОЛНЕНО] |
-| Release build + analyze | 25.28 | [НЕ ВЫПОЛНЕНО] |
-| Python unittest | 18.73 | [НЕ ВЫПОЛНЕНО] |
+| Debug unit + build + analyze | 32.85 | 90.71 |
+| Полный Debug test с UI | 193.24 | 185.75 |
+| Release build + analyze | 25.28 | 12.13 |
+| Python unittest | 18.73 | 19.21 |
 
 Время — один запуск каждой команды, не статистическое доказательство ускорения. Сравниваются проверки корректности; скорость приложения не менялась.
 FSEvents/диагностика отсутствующих Simulator services и XPC shutdown не выдаются за ошибку компиляции; успех подтвержден маркерами xcodebuild.
@@ -296,3 +296,39 @@ PR меняет только отчет относительно облачно�
 ```
 
 Нет commit/push в main, принудительной отправки, операций с тегами/историей или отмены пользовательских правок.
+
+Итоговые данные:
+
+```json
+{
+  "outcome": "Локальная приемка прошла: 106 модульных тестов (6 штатных пропусков), 13 UI, 72 Python; Debug/Release build/analyze успешны. Два CI-запуска первого коммита отчета прошли. После обновления отчета проверяется CI окончательного head.",
+  "pr": "https://github.com/sergeyssimonov-max/HHVacancySber/pull/1",
+  "baseline_commit": "6e76afdfc7086a598c029ed132eacf9b814d8bfe",
+  "origin_main_unchanged": "389412131f2223dbb009dd3959ac15893be87b2f",
+  "protected_files_unchanged": 63,
+  "source_status_identical": true,
+  "source_changes_by_cleanup": 0,
+  "removed_cache_roots": 60,
+  "removed_cache_files": 28476,
+  "removed_allocated_mib": 2424.426,
+  "cloud_irreversible_actions": 0,
+  "ci_first_commit": [
+    "https://github.com/sergeyssimonov-max/HHVacancySber/actions/runs/33992297677",
+    "https://github.com/sergeyssimonov-max/HHVacancySber/actions/runs/33992299903"
+  ],
+  "scope_limit": "Семантический dead-code аудит через LSP не выполнялся; удаления исходников нет. Исторические продукты и результаты сохранены.",
+  "old_temp_paths_decrease_mib": 2411.156,
+  "new_verification_and_worktree": [
+    {
+      "path": "/private/tmp/HHVacancySber-cleanup-verify",
+      "allocated_kib": 221444
+    },
+    {
+      "path": "/private/tmp/HHVacancySber-cleanup-branch",
+      "allocated_kib": 656
+    }
+  ],
+  "net_temp_paths_decrease_mib": 2194.261,
+  "note_measure": "Net temp measure excludes quarantine; baseline and new verification caches are retained. Git metrics measured before final report commit."
+}
+```
