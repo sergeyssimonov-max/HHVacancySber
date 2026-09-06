@@ -93,7 +93,7 @@ struct EmployerConfigurationStore: EmployerConfigurationStoring, @unchecked Send
         // Upgrade only the exact shipped default. Any user edit, including a
         // comment, removal or reordering, makes the runtime file authoritative.
         if let bundledDefaultURL {
-            for legacyName in ["employers.legacy-v1.json", "employers.legacy-44.json"] {
+            for legacyName in ["employers.legacy-v1.json", "employers.legacy-44.json", "employers.legacy-45.json"] {
                 let legacyURL = bundledDefaultURL.deletingLastPathComponent().appendingPathComponent(legacyName)
                 if fileManager.fileExists(atPath: legacyURL.path) {
                     let legacy = try JSONDecoder().decode(EmployerConfiguration.self, from: Data(contentsOf: legacyURL)).validated()

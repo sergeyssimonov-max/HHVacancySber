@@ -249,12 +249,12 @@ final class HHVacancySberTests: XCTestCase {
         let current = try JSONDecoder().decode(EmployerConfiguration.self, from: Data(contentsOf: bundled)).validated()
         let legacy = try JSONDecoder().decode(EmployerConfiguration.self, from: Data(contentsOf: legacyURL)).validated()
         let ids = Set(current.employers.map(\.id))
-        XCTAssertEqual(ids.count, 45)
+        XCTAssertEqual(ids.count, 47)
         XCTAssertEqual(current.employers.first { $0.id == "11685629" }?.jointVenture, true)
         XCTAssertEqual(legacy.employers.count, 11)
         XCTAssertTrue(Set(legacy.employers.map(\.id)).isSubset(of: ids))
-        XCTAssertTrue(Set(["11036409", "1071925", "64174", "1975264", "3513136", "2460946"]).isSubset(of: ids))
-        XCTAssertTrue(ids.isDisjoint(with: ["2104700", "4659934", "5803001", "2367681", "5267014", "1480834", "9074152", "1375441", "1829949", "3853446", "2425896", "4585", "8620"]))
+        XCTAssertTrue(Set(["11036409", "1071925", "64174", "1975264", "3513136", "2460946", "2367681", "3853446"]).isSubset(of: ids))
+        XCTAssertTrue(ids.isDisjoint(with: ["2104700", "4659934", "5803001", "5267014", "1480834", "9074152", "1375441", "1829949", "2425896", "4585", "8620"]))
         let directory = temporaryDirectory()
         let runtime = directory.appendingPathComponent("runtime/employers.json")
         let store = EmployerConfigurationStore(fileURL: runtime, bundledDefaultURL: bundled)
@@ -268,7 +268,15 @@ final class HHVacancySberTests: XCTestCase {
         XCTAssertEqual(try store.loadOrCreate(), current)
         XCTAssertEqual(try store.loadOrCreate(), current)
 
-        var customEntries = previous.employers
+        let previous45URL = try XCTUnwrap(Bundle.main.url(forResource: "employers.legacy-45", withExtension: "json"))
+        let previous45 = try JSONDecoder().decode(EmployerConfiguration.self, from: Data(contentsOf: previous45URL)).validated()
+        XCTAssertEqual(previous45.employers.count, 45)
+        XCTAssertEqual(Array(current.employers.prefix(45)), previous45.employers)
+        try Data(contentsOf: previous45URL).write(to: runtime)
+        XCTAssertEqual(try store.loadOrCreate(), current)
+        XCTAssertEqual(try store.loadOrCreate(), current)
+
+        var customEntries = previous45.employers
         let first = customEntries[0]
         customEntries[0] = .init(id: first.id, name: first.name, comment: "user edit")
         let custom = EmployerConfiguration(version: 1, employers: customEntries)
