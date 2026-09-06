@@ -1881,11 +1881,11 @@ final class HHVacancySberTests: XCTestCase {
     func testPDFFallbackPreservesSummaryFieldsInPersonalAndFavoriteDocuments() async throws {
         let directory = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let summary = HHVacancySummary(id: "fallback-fields", name: "UNIQUE_TITLE_ALPHA",
+        let summary = HHVacancySummary(id: "fallback-fields", name: "UniqueTitleAlpha",
             employer: .init(name: "СБЕР", id: "3529"),
             salary: .init(from: 123_456, to: nil, currency: "RUR", gross: false),
             area: .init(id: "1", name: "Москва"), alternateURL: "https://example.invalid/fallback-fields",
-            url: nil, snippet: .init(requirement: "UNIQUE_SNIPPET_BETA", responsibility: nil),
+            url: nil, snippet: .init(requirement: "UniqueSnippetBeta", responsibility: nil),
             department: .init(name: "DepartmentFallback"), publishedAt: "2026-09-02T12:34:56+0300")
         let value = VacancySearchResult(id: summary.id, summary: summary,
             details: .init(id: summary.id, name: summary.name, employer: nil, area: nil,
@@ -1904,12 +1904,12 @@ final class HHVacancySberTests: XCTestCase {
             let pdf = try XCTUnwrap(PDFDocument(url: file))
             XCTAssertEqual(pdf.pageCount, 1)
             let text = try extractedStatisticsText(pdf)
-            // PDFKit on macOS 15 inserts extraction-only line breaks around
-            // underscores. Preserve exact source markers and require every glyph
-            // exactly once in the PDF, independent of extracted whitespace.
+            // Use word markers: PDFKit versions can reorder punctuation during
+            // extraction. Check exact source content and one complete occurrence
+            // in the PDF, independent of extracted whitespace.
             let sourceText = VacancyPDFFormatter.attributedDocument(for: value).string
             let markerText = text.components(separatedBy: .whitespacesAndNewlines).joined()
-            for marker in ["UNIQUE_TITLE_ALPHA", "UNIQUE_SNIPPET_BETA"] {
+            for marker in ["UniqueTitleAlpha", "UniqueSnippetBeta"] {
                 XCTAssertEqual(sourceText.components(separatedBy: marker).count - 1, 1)
                 XCTAssertEqual(markerText.components(separatedBy: marker).count - 1, 1,
                                "Extracted synthetic PDF text: \(text)")
