@@ -83,7 +83,7 @@ enum VacancySearchViews {
             } else if viewModel.hasSearched && viewModel.displayedResults.isEmpty {
                 empty(title: "Вакансий не найдено", message: "Для выбранных работодателей и фильтров вакансий сейчас нет.", action: "Обновить")
             } else if !viewModel.hasSearched && viewModel.displayedResults.isEmpty {
-                empty(title: "СберВакансии", message: "Загрузите открытые вакансии настроенных работодателей группы Сбер по всей России.", action: "Загрузить")
+                empty(title: "СберВакансии", message: "Загрузите открытые вакансии настроенных работодателей группы Сбер по всей России.", action: "Обновить выборку")
             } else {
                 results
             }
@@ -95,12 +95,6 @@ enum VacancySearchViews {
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
                     .accessibilityIdentifier("displayedVacancyCount")
-                if viewModel.isLoading, let status = viewModel.statusMessage {
-                    Text("· \(status)").lineLimit(1)
-                } else if let message = viewModel.statisticsPDFExportMessage {
-                    Text(message).lineLimit(1).help(message)
-                        .accessibilityIdentifier("statisticsPDFExportMessage")
-                }
                 Spacer()
                 if viewModel.isShowingFavorites {
                     if let progress = viewModel.favoritesPDFExportProgress {
@@ -157,7 +151,14 @@ enum VacancySearchViews {
             VStack(spacing: 12) {
                 Text(title).font(.headline)
                 Text(message).foregroundColor(.secondary).multilineTextAlignment(.center).frame(maxWidth: 520)
-                Button(action, action: refresh).buttonStyle(.borderedProminent)
+                Button(action: refresh) {
+                    Text(action)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .frame(width: ToolbarMetrics.refreshWidth, height: ToolbarMetrics.controlHeight)
+                .accessibilityIdentifier("emptyRefreshVacanciesButton")
             }.padding(32).frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
@@ -167,6 +168,7 @@ enum VacancySearchViews {
 private struct PDFExportCommand: View {
     let title: String
     let action: () -> Void
+    var textColor: Color = .primary
 
     var body: some View {
         Button(action: action) {
@@ -177,7 +179,7 @@ private struct PDFExportCommand: View {
         }
         .buttonStyle(.borderless)
         .controlSize(.regular)
-        .foregroundColor(.primary)
+        .foregroundColor(textColor)
     }
 }
 
@@ -191,8 +193,17 @@ private struct VacancyCard: View {
     let openURL: () -> Void
     let copyURL: () -> Bool
     let exportPDF: () async -> Bool
+    @Environment(\.colorScheme) private var colorScheme
     @State private var copied = false
     @State private var exported = false
+
+    private var primaryText: Color {
+        VacancyFieldPalette.primary(for: result.field, scheme: colorScheme)?.color ?? .primary
+    }
+
+    private var secondaryText: Color {
+        VacancyFieldPalette.secondary(for: result.field, scheme: colorScheme)?.color ?? .secondary
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -204,29 +215,45 @@ private struct VacancyCard: View {
                             .accessibilityIdentifier("vacancyTitle.\(result.id)")
                         if result.isArchived { Label("В архиве", systemImage: "archivebox").font(.caption) }
                     }
-                    Text(result.employerName).font(.system(size: 13)).foregroundColor(.secondary)
-                    if let department = result.departmentName { Text(department).font(.caption).foregroundColor(.secondary) }
+                    if result.field != .general {
+                        Text(result.field == .informationSecurity ? "ИБ" : "IT · Данные · ИИ")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(primaryText)
+                            .accessibilityLabel(result.field == .informationSecurity
+                                ? "Направление: информационная безопасность"
+                                : "Направление: IT, данные, искусственный интеллект и смежные технологии")
+                            .accessibilityIdentifier("\(result.field == .informationSecurity ? "informationSecurityLabel" : "technologyBadge").\(result.id)")
+                            .help(result.field == .informationSecurity
+                                ? "Информационная безопасность и смежные направления. Определено автоматически по содержанию вакансии."
+                                : "IT, данные, ИИ и смежные направления. Определено автоматически по содержанию вакансии.")
+                    }
+                    Text(result.employerName).font(.system(size: 13)).foregroundColor(secondaryText)
+                    if let department = result.departmentName { Text(department).font(.caption).foregroundColor(secondaryText) }
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 5) {
                     Text(result.salaryText ?? "Зарплата не указана").font(.system(size: 13))
-                    Text(result.areaName).font(.caption).foregroundColor(.secondary)
+                    Text(result.areaName).font(.caption).foregroundColor(secondaryText)
                 }
             }
             HStack(spacing: 10) {
                 Button("Открыть на hh.ru ↗", action: openURL).disabled(result.alternateURL == nil)
                 Button(copied ? "✓ Скопировано" : "Скопировать ссылку") { if copyURL() { copied = true } }.disabled(result.alternateURL == nil)
                 Button(isFavorite ? "★ В избранном" : "☆ В избранное", action: toggleFavorite)
+                    .accessibilityIdentifier("favoriteVacancy.\(result.id)")
                 Button(isExpanded ? "Скрыть детали" : "Подробнее", action: toggleDetails)
                     .accessibilityIdentifier("expandVacancy.\(result.id)")
                 Spacer()
-                PDFExportCommand(title: exported ? "✓ Сохранено" : "Экспорт в PDF") {
+                PDFExportCommand(title: exported ? "✓ Сохранено" : "Экспорт в PDF", action: {
                     Task { if await exportPDF() { exported = true } }
-                }.disabled(exported)
+                }, textColor: primaryText).disabled(exported)
                     .accessibilityIdentifier("exportVacancyPDF.\(result.id)")
             }.buttonStyle(.borderless)
+                .foregroundColor(result.field != .general ? primaryText : nil)
+                .tint(result.field != .general ? primaryText : nil)
             if isExpanded { details }
         }
+        .foregroundColor(primaryText)
         .padding(.horizontal, 28)
         .padding(.vertical, 18)
     }
@@ -238,9 +265,9 @@ private struct VacancyCard: View {
             } else if let error = result.detailErrorMessage {
                 Label(error, systemImage: "exclamationmark.triangle")
             } else if result.hasFullDescription {
-                VacancyHTMLDescriptionView(html: result.htmlDescription).frame(minHeight: 320)
+                VacancyHTMLDescriptionView(html: result.htmlDescription, field: result.field).frame(minHeight: 320)
             } else {
-                Text("Полное описание вакансии отсутствует.").foregroundColor(.secondary)
+                Text("Полное описание вакансии отсутствует.").foregroundColor(secondaryText)
             }
         }
         .font(.caption)
@@ -252,12 +279,24 @@ private struct VacancyCard: View {
 }
 
 struct VacancyHTMLDocument {
-    static func make(from bodyHTML: String) -> String {
+    static func make(from bodyHTML: String, field: VacancyField = .general) -> String {
         let body = VacancyHTMLAttributedText.sanitize(bodyHTML)
+        let fieldStyle: String
+        if let light = VacancyFieldPalette.primary(for: field, scheme: .light),
+           let dark = VacancyFieldPalette.primary(for: field, scheme: .dark) {
+            fieldStyle = """
+            :root{--vacancy-text:\(light.css)}
+            @media(prefers-color-scheme:dark){:root{--vacancy-text:\(dark.css)}}
+            body,a{color:var(--vacancy-text)}
+            """
+        } else {
+            fieldStyle = ""
+        }
         return """
         <!doctype html><html><head><meta charset="utf-8"><style>
         :root{color-scheme:light dark} body{margin:14px;font:-apple-system-body;color:-apple-system-label;background:transparent;overflow-wrap:anywhere}
         a{color:-apple-system-link} img,table{max-width:100%;height:auto}
+        \(fieldStyle)
         </style></head><body>\(body)</body></html>
         """
     }
@@ -265,19 +304,56 @@ struct VacancyHTMLDocument {
 
 struct VacancyHTMLDescriptionView: NSViewRepresentable {
     let html: String
+    var field: VacancyField = .general
+    @Environment(\.colorScheme) private var colorScheme
+
     func makeCoordinator() -> Coordinator { Coordinator() }
     func makeNSView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration(); configuration.websiteDataStore = .nonPersistent(); configuration.defaultWebpagePreferences.allowsContentJavaScript = false
         let view = WKWebView(frame: .zero, configuration: configuration); view.navigationDelegate = context.coordinator; view.underPageBackgroundColor = .clear; return view
     }
     func updateNSView(_ view: WKWebView, context: Context) {
-        guard context.coordinator.loaded != html else { return }
-        context.coordinator.loaded = html; view.loadHTMLString(VacancyHTMLDocument.make(from: html), baseURL: nil)
+        // Match SwiftUI even when appearance is overridden locally; CSS updates without reloading.
+        view.appearance = NSAppearance(named: colorScheme == .dark ? .darkAqua : .aqua)
+        guard context.coordinator.loaded != html || context.coordinator.field != field else { return }
+        context.coordinator.loaded = html
+        context.coordinator.field = field
+        view.loadHTMLString(VacancyHTMLDocument.make(from: html, field: field), baseURL: nil)
     }
     final class Coordinator: NSObject, WKNavigationDelegate {
         var loaded: String?
+        var field: VacancyField?
         func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
             decisionHandler(action.request.url?.scheme == "about" ? .allow : .cancel)
+        }
+    }
+}
+
+// Opaque, muted tones keep small text readable on both native card backgrounds.
+// Share exact sRGB values between SwiftUI and the HTML description.
+enum VacancyFieldPalette {
+    struct Tone {
+        let rgb: UInt32
+        var color: Color {
+            Color(.sRGB, red: Double((rgb >> 16) & 0xff) / 255,
+                  green: Double((rgb >> 8) & 0xff) / 255, blue: Double(rgb & 0xff) / 255)
+        }
+        var css: String { String(format: "#%06X", rgb) }
+    }
+
+    static func primary(for field: VacancyField, scheme: ColorScheme) -> Tone? {
+        switch field {
+        case .general: return nil
+        case .technology: return Tone(rgb: scheme == .dark ? 0x8BC5CA : 0x176C74)
+        case .informationSecurity: return Tone(rgb: scheme == .dark ? 0xDEB394 : 0x925235)
+        }
+    }
+
+    static func secondary(for field: VacancyField, scheme: ColorScheme) -> Tone? {
+        switch field {
+        case .general: return nil
+        case .technology: return Tone(rgb: scheme == .dark ? 0x91B6BB : 0x326F76)
+        case .informationSecurity: return Tone(rgb: scheme == .dark ? 0xC7AD9B : 0x86624D)
         }
     }
 }

@@ -2,12 +2,161 @@ import AppKit
 import Foundation
 import PDFKit
 import XCTest
+import SwiftUI
 @testable import HHVacancySber
 
 final class HHVacancySberTests: XCTestCase {
     override func tearDown() {
         URLProtocolStub.handler = nil
         super.tearDown()
+    }
+
+    func testTechnologyClassificationRecognizesRequestedFamilies() {
+        let titles = [
+            "Backend-разработчик", "Разработчик 1С", "QA Engineer", "SRE инженер",
+            "Информационные и коммуникационные технологии", "Архитектор решений",
+            "Архитектура решений", "Технический писатель", "UX/UI-дизайнер",
+            "Менеджер продукта", "Финансовый аналитик", "HR-аналитика", "Риск-аналитика",
+            "BI-разработка", "Инженерия данных", "Data Governance", "ETL-разработчик",
+            "Машинное обучение", "LLM-приложения", "RAG-системы", "Edge AI",
+            "Промышленная автоматизация", "Геоинформационные системы", "Биоинформатика",
+            "Методология разработки", "Low-code разработчик", "C++ developer", "HR-tech",
+            "Пентестер", "Системный администратор", "Product Owner", "Интернет"
+        ]
+        for title in titles {
+            XCTAssertTrue(VacancyTechnologyClassifier.matches(title: title), title)
+        }
+    }
+
+    func testTechnologyClassificationAvoidsUnrelatedWordsAndOfficeRequirements() {
+        for title in ["Кассир", "Кредитный специалист", "Водитель", "Архитектор зданий",
+                      "Аудитор", "Менеджер по продажам", "Биолог", "Администратор офиса"] {
+            XCTAssertFalse(VacancyTechnologyClassifier.matches(
+                title: title, context: "Работа в цифровой команде. Пользователь ПК, Excel, интернет и CRM."
+            ), title)
+        }
+        XCTAssertTrue(VacancyTechnologyClassifier.matches(title: "Эксперт", roles: ["Программист, разработчик"]))
+        XCTAssertTrue(VacancyTechnologyClassifier.matches(title: "Инженер", context: "Разработка RAG-системы и векторный поиск"))
+        XCTAssertFalse(VacancyTechnologyClassifier.matches(title: "Repair specialist"))
+    }
+
+    func testInformationSecurityClassificationCoversRequestedDisciplines() {
+        let disciplines = """
+        информационная безопасность; кибербезопасность; защита информации; компьютерная безопасность
+        техническая защита информации; организационная защита информации; правовая защита информации; инженерно-техническая защита
+        защита информации в автоматизированных системах; защита информации в компьютерных системах и сетях; защита информации в телекоммуникационных системах и сетях
+        безопасность компьютерных систем и сетей; информационно-аналитические системы безопасности; безопасность информационных технологий в правоохранительной сфере
+        разработка средств защиты информации; производство средств защиты информации; внедрение средств защиты информации; администрирование средств защиты информации
+        эксплуатация систем защиты информации; проектирование систем защиты информации; архитектура информационной безопасности; управление информационной безопасностью
+        стратегия информационной безопасности; методология информационной безопасности; политики и регламенты информационной безопасности; управление рисками информационной безопасности
+        комплаенс информационной безопасности; аудит информационной безопасности; оценка соответствия требованиям по защите информации; оценка защищённости; анализ угроз; моделирование угроз
+        анализ уязвимостей; управление уязвимостями; тестирование на проникновение; анализ защищённости; этичный хакинг; red team; blue team; purple team; bug bounty; исследование уязвимостей
+        безопасность приложений (AppSec); безопасная разработка; DevSecOps; безопасный SDLC; анализ исходного кода; динамическое тестирование приложений; анализ состава программного обеспечения
+        безопасность кода; безопасность API; безопасность веб-приложений; защита веб-приложений (WAF); безопасность мобильных приложений; безопасность контейнеров и оркестрации
+        безопасность CI/CD; облачная безопасность; сетевая безопасность; безопасность периметра; межсетевое экранирование; сегментация сетей; обнаружение и предотвращение вторжений
+        анализ сетевого трафика; NDR; защита от DDoS; безопасность беспроводных сетей; безопасность электронной почты; антифишинг; защита конечных точек; антивирусная защита; EDR; XDR; песочницы
+        защита от вредоносного кода; анализ вредоносного программного обеспечения; реверс-инжиниринг вредоносного кода; мониторинг информационной безопасности
+        центр мониторинга и реагирования (SOC); управление событиями информационной безопасности (SIEM); оркестрация и автоматизация реагирования (SOAR)
+        управление инцидентами информационной безопасности; реагирование на инциденты; расследование инцидентов; цифровая криминалистика; компьютерно-техническая экспертиза
+        threat hunting; разведка киберугроз; ГосСОПКА; обнаружение и предупреждение компьютерных атак; управление идентификацией и доступом (IAM)
+        управление привилегированным доступом (PAM); аутентификация и авторизация; многофакторная аутентификация; управление секретами; Zero Trust
+        защита данных; безопасность данных; конфиденциальность данных; предотвращение утечек данных (DLP); контроль доступа к базам данных; DCAP; классификация данных; маскирование данных; безопасность баз данных
+        криптографическая защита информации; средства криптографической защиты; инфраструктура открытых ключей; удостоверяющие центры; электронная подпись; управление ключами; стеганография
+        защита персональных данных; безопасность ИСПДн; защита коммерческой тайны; защита государственной тайны; режим секретности; противодействие техническим разведкам
+        защита от утечки по техническим каналам; физическая защита информации; безопасность критической информационной инфраструктуры; безопасность объектов КИИ
+        безопасность государственных информационных систем; безопасность АСУ ТП; промышленная кибербезопасность; аттестация объектов информатизации; сертификация средств защиты информации
+        лицензирование деятельности по защите информации; соответствие требованиям ФСТЭК; соответствие требованиям ФСБ; соответствие требованиям Банка России
+        ГОСТ Р ИСО/МЭК 27001; ГОСТ Р 57580; PCI DSS; информационная безопасность кредитно-финансовой сферы; антифрод; безопасность платежей
+        безопасность искусственного интеллекта; безопасность моделей машинного обучения; защита от атак на ИИ; безопасность интернета вещей; безопасность виртуализации
+        безопасность беспилотных и автономных систем; безопасность цепочки поставок программного обеспечения; непрерывность деятельности и аварийное восстановление
+        киберустойчивость; резервное копирование и восстановление; управление конфигурациями безопасности; осведомлённость по информационной безопасности
+        консалтинг по информационной безопасности; управление проектами информационной безопасности; взаимодействие с регуляторами
+        """.components(separatedBy: CharacterSet(charactersIn: ";\n")).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        XCTAssertGreaterThan(disciplines.count, 130)
+        for discipline in disciplines {
+            XCTAssertTrue(VacancyInformationSecurityClassifier.matches(title: discipline), discipline)
+        }
+        for title in ["Специалист по ИБ", "Инженер СЗИ/СКЗИ", "SOC-аналитик L2", "Архитектор AppSec",
+                      "CISO", "Cybersecurity Engineer", "Information Security Officer", "Пентестер",
+                      "Специалист по оценке защищенности", "Red‑Team инженер", "Инженер по\nзащите\u{00a0}информации"] {
+            XCTAssertTrue(VacancyInformationSecurityClassifier.matches(title: title), title)
+        }
+    }
+
+    func testInformationSecurityClassificationUsesSpecificContextAndRoleEvidence() {
+        for context in ["Проектирование систем защиты информации", "Мониторинг событий SIEM и расследование атак",
+                        "Проводить аудит информационной безопасности", "Внедрение DLP", "Работа с PCI DSS",
+                        "Контроль соблюдения требований информационной безопасности", "Разработка политик ИБ"] {
+            XCTAssertTrue(VacancyInformationSecurityClassifier.matches(title: "Главный эксперт", context: context), context)
+        }
+        XCTAssertTrue(VacancyInformationSecurityClassifier.matches(title: "Эксперт", roles: ["Специалист по информационной безопасности"]))
+        XCTAssertTrue(VacancyInformationSecurityClassifier.matches(title: "Эксперт", roles: ["Инженер по резервному копированию"]))
+    }
+
+    func testInformationSecurityClassificationAvoidsGenericSecurityAndBoilerplate() {
+        for title in ["Охранник", "Специалист по пожарной безопасности", "Инженер по промышленной безопасности",
+                      "Специалист по экономической безопасности", "Java-разработчик", "Менеджер по продажам",
+                      "Кассир", "Финансовый аудитор", "Дизайнер", "Социальный работник", "Pampas specialist",
+                      "Сибирский региональный менеджер", "DevOps engineer"] {
+            for context in ["Соблюдение требований информационной безопасности и охраны труда.",
+                            "Соблюдать внутренние политики ИБ. Знание основ информационной безопасности.",
+                            "Следовать правилам защиты персональных данных.",
+                            "Резервное копирование и восстановление. Анализ исходного кода. Аутентификация и авторизация.",
+                            "Взаимодействие с регуляторами. Соответствие требованиям Банка России.",
+                            "Согласие на обработку персональных данных.", "Работа в SOCIETY, IPSUM, EDRIVE."] {
+                XCTAssertFalse(VacancyInformationSecurityClassifier.matches(title: title, context: context), "\(title): \(context)")
+            }
+        }
+    }
+
+    func testInformationSecurityFieldSurvivesDetailAndFavoriteLifecycle() throws {
+        let summary = HHVacancySummary(id: "security", name: "Инженер", employer: .init(name: "СБЕР"),
+                                       salary: nil, area: nil, alternateURL: nil, url: nil, snippet: nil)
+        let partial = HHVacancyDetails(id: summary.id, name: summary.name, employer: summary.employer,
+                                       area: nil, salary: nil, alternateURL: nil, description: nil, archived: false)
+        let before = VacancySearchResult(id: summary.id, summary: summary, details: partial)
+        XCTAssertEqual(before.field, .general)
+        let details = HHVacancyDetails(id: summary.id, name: summary.name, employer: summary.employer,
+                                      area: nil, salary: nil, alternateURL: nil,
+                                      description: "<p>Разработка <b>средств защиты информации</b> и сервисов на Java.</p>", archived: false)
+        let loaded = VacancySearchResult(id: summary.id, summary: summary, details: details, isDetailLoaded: true)
+        XCTAssertTrue(loaded.isTechnologyRelated)
+        XCTAssertTrue(loaded.isInformationSecurityRelated)
+        XCTAssertEqual(loaded.field, .informationSecurity)
+        XCTAssertEqual(loaded.updatingDetailState(isLoading: true, errorMessage: nil).field, .informationSecurity)
+        let favorite = FavoriteVacancyRecord(result: loaded, favoritedAt: Date(), updatedAt: Date())
+        let restored = try JSONDecoder().decode(FavoriteVacancyRecord.self, from: JSONEncoder().encode(favorite))
+        XCTAssertEqual(restored.searchResult.field, .informationSecurity)
+        XCTAssertEqual(restored.searchResult.htmlDescription, loaded.htmlDescription)
+
+        let plainIT = HHVacancyDetails(id: "it", name: "Java-разработчик", employer: nil, area: nil, salary: nil,
+                                      alternateURL: nil, description: "Соблюдение требований информационной безопасности.", archived: false)
+        XCTAssertEqual(VacancySearchResult(id: "it", summary: summary, details: plainIT).field, .technology)
+        let snippet = HHVacancySummary(id: "snippet", name: "Эксперт", employer: nil, salary: nil, area: nil,
+                                      alternateURL: nil, url: nil, snippet: .init(requirement: "Опыт внедрения SIEM", responsibility: nil))
+        XCTAssertEqual(VacancySearchResult(id: "snippet", summary: snippet, details: partial).field, .informationSecurity)
+    }
+
+    func testVacancyFieldTextContrastsWithBothNativeBackgrounds() throws {
+        func luminance(_ channels: [Double]) -> Double {
+            zip(channels.map { $0 <= 0.04045 ? $0 / 12.92 : pow(($0 + 0.055) / 1.055, 2.4) },
+                [0.2126, 0.7152, 0.0722]).map(*).reduce(0, +)
+        }
+        for (appearance, scheme) in [(NSAppearance.Name.aqua, SwiftUI.ColorScheme.light), (.darkAqua, .dark)] {
+            try XCTUnwrap(NSAppearance(named: appearance)).performAsCurrentDrawingAppearance {
+                for background in [NSColor.textBackgroundColor, .windowBackgroundColor] {
+                    let bg = background.usingColorSpace(.sRGB)!
+                    let bgL = luminance([bg.redComponent, bg.greenComponent, bg.blueComponent])
+                    for field in [VacancyField.technology, .informationSecurity] {
+                        for tone in [VacancyFieldPalette.primary(for: field, scheme: scheme)!, VacancyFieldPalette.secondary(for: field, scheme: scheme)!] {
+                            let rgb = tone.rgb
+                            let fgL = luminance([Double((rgb >> 16) & 255), Double((rgb >> 8) & 255), Double(rgb & 255)].map { $0 / 255 })
+                            XCTAssertGreaterThanOrEqual((max(bgL, fgL) + 0.05) / (min(bgL, fgL) + 0.05), 4.5, "\(field), \(scheme), \(tone.css)")
+                        }
+                    }
+                }
+            }
+        }
     }
 
     func testEmbeddedApplicationTokenIsConfigured() {
@@ -35,6 +184,109 @@ final class HHVacancySberTests: XCTestCase {
         XCTAssertEqual(try store.loadOrCreate().employers.map(\.id), ["3529"])
         try Data(#"{"version":1,"employers":[{"id":"2798","name":"СберРешения","comment":"runtime"}]}"#.utf8).write(to: runtime)
         XCTAssertEqual(try store.loadOrCreate().employers.map(\.id), ["2798"])
+    }
+
+    func testEmployerConfigurationMigratesUntouchedLegacyDefault() throws {
+        let directory = temporaryDirectory()
+        let bundled = directory.appendingPathComponent("employers.json")
+        let legacyURL = directory.appendingPathComponent("employers.legacy-v1.json")
+        let runtime = directory.appendingPathComponent("runtime.json")
+        let legacy = EmployerConfiguration(version: 1, employers: [.init(id: "3529", name: "СБЕР", comment: "old")])
+        let updated = EmployerConfiguration(version: 1, employers: legacy.employers + [.init(id: "11036409", name: "ПУЛЬС", comment: "new")])
+        try JSONEncoder().encode(legacy).write(to: legacyURL)
+        try JSONEncoder().encode(legacy).write(to: runtime)
+        try JSONEncoder().encode(updated).write(to: bundled)
+        let store = EmployerConfigurationStore(fileURL: runtime, bundledDefaultURL: bundled)
+        XCTAssertEqual(try store.loadOrCreate(), updated)
+        XCTAssertEqual(try JSONDecoder().decode(EmployerConfiguration.self, from: Data(contentsOf: runtime)), updated)
+        XCTAssertEqual(try store.loadOrCreate(), updated)
+    }
+
+    func testEmployerConfigurationPreservesEveryKindOfCustomization() throws {
+        let directory = temporaryDirectory()
+        let bundled = directory.appendingPathComponent("employers.json")
+        let legacyURL = directory.appendingPathComponent("employers.legacy-v1.json")
+        let runtime = directory.appendingPathComponent("runtime.json")
+        let first = EmployerConfigurationEntry(id: "3529", name: "СБЕР", comment: "old")
+        let second = EmployerConfigurationEntry(id: "2798", name: "СберРешения", comment: "old")
+        let extra = EmployerConfigurationEntry(id: "11036409", name: "ПУЛЬС", comment: "new")
+        try JSONEncoder().encode(EmployerConfiguration(version: 1, employers: [first, second])).write(to: legacyURL)
+        try JSONEncoder().encode(EmployerConfiguration(version: 1, employers: [first, second, extra])).write(to: bundled)
+        for entries in [[first], [second, first], [first, second, extra],
+                        [.init(id: first.id, name: first.name, comment: "my comment"), second],
+                        [.init(id: first.id, name: "my name", comment: first.comment), second]] {
+            let custom = EmployerConfiguration(version: 1, employers: entries)
+            let data = try JSONEncoder().encode(custom)
+            try data.write(to: runtime)
+            let store = EmployerConfigurationStore(fileURL: runtime, bundledDefaultURL: bundled)
+            XCTAssertEqual(try store.loadOrCreate(), custom)
+            XCTAssertEqual(try Data(contentsOf: runtime), data)
+        }
+    }
+
+    func testEmployerConfigurationMigrationDoesNotReplaceInvalidRuntimeOrDefault() throws {
+        let directory = temporaryDirectory()
+        let bundled = directory.appendingPathComponent("employers.json")
+        let legacyURL = directory.appendingPathComponent("employers.legacy-v1.json")
+        let runtime = directory.appendingPathComponent("runtime.json")
+        let legacy = try JSONEncoder().encode(EmployerConfiguration(version: 1, employers: [.init(id: "3529", name: "СБЕР", comment: "old")]))
+        let invalid = Data("invalid JSON".utf8)
+        try legacy.write(to: legacyURL)
+        let store = EmployerConfigurationStore(fileURL: runtime, bundledDefaultURL: bundled)
+        try legacy.write(to: bundled)
+        try invalid.write(to: runtime)
+        XCTAssertThrowsError(try store.loadOrCreate())
+        XCTAssertEqual(try Data(contentsOf: runtime), invalid)
+        try legacy.write(to: runtime)
+        try invalid.write(to: bundled)
+        XCTAssertThrowsError(try store.loadOrCreate())
+        XCTAssertEqual(try Data(contentsOf: runtime), legacy)
+    }
+
+    func testEmployerConfigurationBundledPerimeterAndRealLegacyMigration() throws {
+        let bundled = try XCTUnwrap(Bundle.main.url(forResource: "employers", withExtension: "json"))
+        let legacyURL = try XCTUnwrap(Bundle.main.url(forResource: "employers.legacy-v1", withExtension: "json"))
+        let current = try JSONDecoder().decode(EmployerConfiguration.self, from: Data(contentsOf: bundled)).validated()
+        let legacy = try JSONDecoder().decode(EmployerConfiguration.self, from: Data(contentsOf: legacyURL)).validated()
+        let ids = Set(current.employers.map(\.id))
+        XCTAssertEqual(ids.count, 45)
+        XCTAssertEqual(current.employers.first { $0.id == "11685629" }?.jointVenture, true)
+        XCTAssertEqual(legacy.employers.count, 11)
+        XCTAssertTrue(Set(legacy.employers.map(\.id)).isSubset(of: ids))
+        XCTAssertTrue(Set(["11036409", "1071925", "64174", "1975264", "3513136", "2460946"]).isSubset(of: ids))
+        XCTAssertTrue(ids.isDisjoint(with: ["2104700", "4659934", "5803001", "2367681", "5267014", "1480834", "9074152", "1375441", "1829949", "3853446", "2425896", "4585", "8620"]))
+        let directory = temporaryDirectory()
+        let runtime = directory.appendingPathComponent("runtime/employers.json")
+        let store = EmployerConfigurationStore(fileURL: runtime, bundledDefaultURL: bundled)
+        XCTAssertEqual(try store.loadOrCreate(), current)
+        try Data(contentsOf: legacyURL).write(to: runtime)
+        XCTAssertEqual(try store.loadOrCreate(), current)
+        let previousURL = try XCTUnwrap(Bundle.main.url(forResource: "employers.legacy-44", withExtension: "json"))
+        let previous = try JSONDecoder().decode(EmployerConfiguration.self, from: Data(contentsOf: previousURL)).validated()
+        XCTAssertEqual(previous.employers.count, 44)
+        try Data(contentsOf: previousURL).write(to: runtime)
+        XCTAssertEqual(try store.loadOrCreate(), current)
+        XCTAssertEqual(try store.loadOrCreate(), current)
+
+        var customEntries = previous.employers
+        let first = customEntries[0]
+        customEntries[0] = .init(id: first.id, name: first.name, comment: "user edit")
+        let custom = EmployerConfiguration(version: 1, employers: customEntries)
+        let customData = try JSONEncoder().encode(custom)
+        try customData.write(to: runtime)
+        XCTAssertEqual(try store.loadOrCreate(), custom)
+        XCTAssertEqual(try Data(contentsOf: runtime), customData)
+    }
+
+    func testEmployerConfigurationJointVentureMetadataRoundTrips() throws {
+        let legacy = Data(#"{"id":"3529","name":"Sber","comment":"old"}"#.utf8)
+        XCTAssertNil(try JSONDecoder().decode(EmployerConfigurationEntry.self, from: legacy).jointVenture)
+        let entry = EmployerConfigurationEntry(id: "11685629", name: "Gistech", comment: "JV", jointVenture: true)
+        let encoded = try JSONEncoder().encode(entry)
+        XCTAssertEqual(try JSONDecoder().decode(EmployerConfigurationEntry.self, from: encoded), entry)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        XCTAssertEqual(json["joint_venture"] as? Bool, true)
+        XCTAssertNil(json["jointVenture"])
     }
 
     func testPersistentStoresShareCanonicalApplicationSupportDirectory() {
@@ -280,7 +532,8 @@ final class HHVacancySberTests: XCTestCase {
         var requestCount = 0
         let client = HHAPIClient(
             accessTokenProvider: HHDefaultAccessTokenProvider(),
-            requestGate: HHRequestGate(minimumDelayNanoseconds: 0)
+            requestGate: HHRequestGate(minimumDelayNanoseconds: 0),
+            maximumRateLimitRetries: 0
         )
 
         requestCount += 1
@@ -296,6 +549,129 @@ final class HHVacancySberTests: XCTestCase {
         XCTAssertEqual(details.id, vacancy.id)
         XCTAssertFalse(details.name.isEmpty)
         XCTAssertLessThanOrEqual(requestCount, maximumRequestCount)
+    }
+
+    func testLiveAPITechnologyBadgeRecognizesExplicitTechnicalTitles() async throws {
+        try XCTSkipUnless(
+            ProcessInfo.processInfo.environment["HHVACANCYSBER_RUN_LIVE_TECHNOLOGY_TEST"] == "1",
+            "Opt-in: set HHVACANCYSBER_RUN_LIVE_TECHNOLOGY_TEST=1. At most one search request."
+        )
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 15
+        configuration.timeoutIntervalForResource = 20
+        configuration.urlCache = nil
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let client = HHAPIClient(session: session, requestGate: HHRequestGate(), maximumRateLimitRetries: 0)
+
+        // One bounded production request; no paging, detail fetching or retry on errors.
+        let response = try await client.searchVacancies(.init(employerID: "3529", perPage: 20))
+        XCTAssertLessThanOrEqual(response.items.count, 20)
+        // Independent, intentionally narrow oracle, not the production classifier:
+        // these job titles unambiguously belong to the requested technology group.
+        let technicalTitle = try NSRegularExpression(
+            pattern: #"(?i)(?<![\p{L}\p{N}])(?:разработчик[а-я]*|программист[а-я]*|тестировщик[а-я]*|devops|sre|frontend|backend|fullstack)(?![\p{L}\p{N}])"#
+        )
+        let candidates = response.items.filter { vacancy in
+            technicalTitle.firstMatch(in: vacancy.name, range: NSRange(vacancy.name.startIndex..., in: vacancy.name)) != nil
+        }
+        try XCTSkipIf(candidates.isEmpty, "No explicit technical titles in this live sample; no additional requests made.")
+        for summary in candidates {
+            let result = VacancySearchResult(
+                id: summary.id,
+                summary: summary,
+                details: HHVacancyDetails(
+                    id: summary.id, name: summary.name, employer: summary.employer,
+                    area: summary.area, salary: summary.salary,
+                    alternateURL: summary.alternateURL, description: nil
+                )
+            )
+            XCTAssertTrue(result.isTechnologyRelated, "Explicit technical title must receive the technology badge (vacancy ID: \(summary.id)).")
+            XCTAssertTrue(result.updatingDetailState(isLoading: true, errorMessage: nil).isTechnologyRelated)
+        }
+    }
+
+    @MainActor
+    func testLiveCancellationWhenEmployerFilterHidesDetails() async throws {
+        try await checkLiveDetailCancellation(transition: .employer)
+    }
+
+    @MainActor
+    func testLiveCancellationWhenRegionFilterHidesDetails() async throws {
+        try await checkLiveDetailCancellation(transition: .region)
+    }
+
+    @MainActor
+    func testLiveCancellationWhenFavoritesModeHidesDetails() async throws {
+        try await checkLiveDetailCancellation(transition: .favorites)
+    }
+
+    @MainActor
+    private func checkLiveDetailCancellation(transition: LiveCancellationTransition) async throws {
+        try XCTSkipUnless(
+            ProcessInfo.processInfo.environment["HHVACANCYSBER_RUN_LIVE_CANCELLATION_TESTS"] == "1",
+            "Opt-in live cancellation group; at most four GET requests for all three tests."
+        )
+        let run = LiveCancellationRun.shared
+        try XCTSkipIf(run.stopped, "Live group stopped after an earlier API or transport failure; no further requests.")
+        defer {
+            let attachment = XCTAttachment(string: run.journal)
+            attachment.name = "Live cancellation request journal"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+        let rows = try await run.searchRows()
+        try XCTSkipIf(rows.count < 3, "Need three distinct live vacancies for three detail requests; no extra search.")
+        let source = rows[transition.rawValue]
+        let received = expectation(description: "Real detail response received before publication")
+        let cancelled = expectation(description: "Hidden card detail Task is cancelled")
+        let resume = TestAsyncSignal()
+        let fixture = FixedSummaryAPIClient(rows: rows, detailLoader: { id in
+            let details = try await run.detail(id: id)
+            received.fulfill()
+            // Hold the genuine response at the client boundary; do not fabricate a
+            // response or cancel the transport ourselves. The ViewModel owns cancellation.
+            await resume.wait()
+            if Task.isCancelled { cancelled.fulfill() }
+            return details
+        })
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = VacancySearchViewModel(
+            apiClient: fixture,
+            employerStore: TestEmployerStore(entries: [.init(id: "3529", name: "СБЕР", comment: "live fixture")]),
+            areaStore: AreaDirectoryStore(fileURL: directory.appendingPathComponent("areas.json"))
+        )
+        await model.search()
+        let sourceIndex = try XCTUnwrap(model.results.firstIndex { $0.id == source.id })
+        XCTAssertFalse(model.results[sourceIndex].isDetailLoaded)
+        model.toggleExplanation(for: source.id)
+        await fulfillment(of: [received], timeout: 25)
+        // API errors stop the shared group, including later XCTest cases.
+        guard !run.stopped else {
+            await resume.signal()
+            XCTFail("Live request failed; inspect the status-only journal.")
+            return
+        }
+        XCTAssertTrue(model.results[sourceIndex].isDetailLoading)
+        XCTAssertEqual(model.expandedVacancyID, source.id)
+        switch transition {
+        case .employer: model.selectedEmployerID = "2798"
+        case .region: model.selectedRegionID = "subject:66"
+        case .favorites: model.displayMode = .favorites
+        }
+        XCTAssertNil(model.expandedVacancyID)
+        XCTAssertFalse(model.displayedResults.contains { $0.id == source.id })
+        await resume.signal()
+        await fulfillment(of: [cancelled], timeout: 2)
+        for _ in 0..<1000 where model.results[sourceIndex].isDetailLoading {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertFalse(model.results[sourceIndex].isDetailLoading)
+        XCTAssertFalse(model.results[sourceIndex].isDetailLoaded)
+        XCTAssertNil(model.results[sourceIndex].detailErrorMessage)
+        XCTAssertNil(model.errorMessage)
+        XCTAssertLessThanOrEqual(run.requestCount, 4)
     }
 
     func testAPIPreserves401RateLimitCaptchaAndNetworkErrors() async throws {
@@ -319,6 +695,236 @@ final class HHVacancySberTests: XCTestCase {
             XCTAssertEqual(error.code, .notConnectedToInternet)
         } catch {
             XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testRateLimitRetriesTwiceThenReturnsSuccessfulResponse() async throws {
+        var requests = 0
+        let client = makeHTTPClient { _ in
+            requests += 1
+            if requests < 3 { return (429, ["Retry-After": "0"], Data(#"{"errors":[]}"#.utf8)) }
+            return (200, [:], Data(#"{"items":[],"found":0,"pages":0,"page":0,"per_page":100}"#.utf8))
+        }
+        do {
+            let response = try await client.searchVacancies(.init(employerID: "3529"))
+            XCTAssertEqual(response.found, 0)
+        } catch {
+            XCTFail("Expected successful response after bounded retries: \(error)")
+        }
+        XCTAssertEqual(requests, 3)
+    }
+
+    @MainActor
+    func testFavoritePDFCollisionCreatesSuffixAndPreservesExistingFile() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let date = Date(timeIntervalSince1970: 1_788_400_000)
+        let name = FavoriteVacanciesPDFExporter.fileName(part: 1, totalParts: 1, exportStartedAt: date)
+        let original = directory.appendingPathComponent(name)
+        let originalData = Data("existing user file".utf8)
+        try originalData.write(to: original)
+        let exporter = FavoriteVacanciesPDFExporter(
+            chooseDirectory: { directory }, confirmReplacement: { _ in false }, now: { date }
+        )
+        let outcome = try await exporter.export(vacancies: [makePDFVacancy(id: "suffix")]) { _ in }
+        guard case .exportedWithCleanupWarning = outcome else {
+            return XCTFail("Expected a new suffixed export without a replacement prompt")
+        }
+        XCTAssertEqual(try Data(contentsOf: original), originalData)
+        let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "pdf" && $0.lastPathComponent != name }
+        XCTAssertEqual(files.count, 1)
+        XCTAssertTrue(try XCTUnwrap(files.first).lastPathComponent.hasSuffix("_2.pdf"))
+        XCTAssertNotNil(PDFDocument(url: try XCTUnwrap(files.first)))
+    }
+
+    func testPDFSuffixPlanHandlesOccupiedNamesDuplicatesAndUTF8Limit() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let worker = PDFExportWorker(fileManager: PDFFileManager(.default))
+        try Data("keep".utf8).write(to: directory.appendingPathComponent("report.pdf"))
+        try Data("keep too".utf8).write(to: directory.appendingPathComponent("report_2.pdf"))
+        let plan = try await worker.availableCollisionPlan(names: ["report.pdf", "report.pdf"], directory: directory)
+        XCTAssertEqual(plan.authorizations.map { $0.destination.lastPathComponent }, ["report_3.pdf", "report_4.pdf"])
+        XCTAssertTrue(plan.authorizations.allSatisfy { $0.expectedState == .absent })
+        let longName = PDFFileNameBuilder.fileName(base: String(repeating: "ёж🙂/", count: 300), fallback: "vacancy")
+        let longPlan = try await worker.availableCollisionPlan(names: [longName, longName], directory: directory)
+        let names = longPlan.authorizations.map { $0.destination.lastPathComponent }
+        XCTAssertEqual(Set(names).count, 2)
+        XCTAssertTrue(names.allSatisfy { $0.utf8.count <= 240 && !$0.contains("/") })
+        XCTAssertTrue(names[1].hasSuffix("_2.pdf"))
+        do {
+            _ = try await worker.availableCollisionPlan(names: ["report.pdf"], directory: directory, maximumCandidates: 2)
+            XCTFail("Expected explicit name exhaustion")
+        } catch FavoriteVacanciesPDFExporter.ExportError.noAvailableFileName {} catch { XCTFail("Unexpected error: \(error)") }
+    }
+
+    func testPDFSuffixSelectionCancellationAndLateCollisionPreserveExistingFile() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let worker = PDFExportWorker(fileManager: PDFFileManager(.default))
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await worker.availableCollisionPlan(names: ["cancel.pdf"], directory: directory)
+        }
+        do { _ = try await task.value; XCTFail("Expected cancellation") }
+        catch is CancellationError {} catch { XCTFail("Unexpected error: \(error)") }
+        _ = try await worker.prepare(vacancies: .init(values: [makePDFVacancy(id: "race")]), progress: { _ in })
+        let plan = try await worker.availableCollisionPlan(names: ["race.pdf"], directory: directory)
+        let destination = directory.appendingPathComponent("race.pdf")
+        let data = Data("appeared after selection".utf8)
+        try data.write(to: destination)
+        do {
+            _ = try await worker.publish(names: ["race.pdf"], directory: directory, authorizations: plan.authorizations)
+            XCTFail("Must not overwrite a late arrival")
+        } catch {}
+        XCTAssertEqual(try Data(contentsOf: destination), data)
+    }
+
+    func testRateLimitWaitPreventsQueuedRequestsFromOvertakingRetry() async throws {
+        let entered = expectation(description: "Retry owns gate")
+        let release = TestAsyncSignal()
+        let gate = HHRequestGate(minimumDelayNanoseconds: 0)
+        var employers: [String] = []
+        URLProtocolStub.handler = { request in
+            let id = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!
+                .first { $0.name == "employer_id" }!.value!
+            employers.append(id)
+            if employers.count == 1 { return (429, [:], Data(#"{"errors":[]}"#.utf8)) }
+            return (200, [:], Data(#"{"items":[],"found":0,"pages":0,"page":0,"per_page":100}"#.utf8))
+        }
+        let client = HTTPClientFactory.make(requestGate: gate, retrySleep: { _ in
+            entered.fulfill()
+            await release.wait()
+        })
+        let first = Task { try await client.searchVacancies(.init(employerID: "3529")) }
+        await fulfillment(of: [entered], timeout: 2)
+        let second = Task { try await client.searchVacancies(.init(employerID: "2798")) }
+        for _ in 0..<200 {
+            if await gate.queuedRequestCount == 1 { break }
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        let queued = await gate.queuedRequestCount
+        XCTAssertEqual(queued, 1)
+        XCTAssertEqual(employers, ["3529"])
+        await release.signal()
+        _ = try await first.value
+        _ = try await second.value
+        XCTAssertEqual(employers, ["3529", "3529", "2798"])
+    }
+
+    func testRateLimitRetryStopsOnForbiddenCaptchaAndConfiguredCeiling() async {
+        for (limit, terminal, captcha, expected) in [(99, 429, false, 3), (-1, 429, false, 1), (2, 403, false, 2), (2, 429, true, 1)] {
+            var requests = 0
+            URLProtocolStub.handler = { _ in
+                requests += 1
+                let body = captcha ? #"{"errors":[{"type":"captcha","value":"required"}]}"# : #"{"errors":[]}"#
+                return (requests == 1 ? 429 : terminal, [:], Data(body.utf8))
+            }
+            let client = HTTPClientFactory.make(maximumRateLimitRetries: limit)
+            do { _ = try await client.searchVacancies(.init(employerID: "3529")); XCTFail("Expected terminal failure") }
+            catch { XCTAssertEqual(requests, expected) }
+        }
+    }
+
+    func testRateLimitRetryBudgetAndServerDelayCeiling() async {
+        for (header, expectedRequests) in [("0", 3), ("60", 3), ("61", 1), ("9999999999999999999999999999999999999999", 1)] {
+            var requests = 0
+            let client = makeHTTPClient { _ in
+                requests += 1
+                return (429, ["Retry-After": header], Data(#"{"errors":[]}"#.utf8))
+            }
+            do { _ = try await client.searchVacancies(.init(employerID: "3529")); XCTFail("Expected rate limit") }
+            catch let error as HHAPIError {
+                guard case .rateLimited = error else { return XCTFail("Expected rate limit") }
+            } catch { XCTFail("Unexpected error: \(error)") }
+            XCTAssertEqual(requests, expectedRequests)
+        }
+    }
+
+    func testRateLimitDelaySupportsHTTPDateAndNeverRetriesBeforeServerDelay() {
+        let now = Date(timeIntervalSince1970: 0)
+        XCTAssertEqual(HHAPIClient.rateLimitDelay(header: nil, now: now, attempt: 0), 1)
+        XCTAssertEqual(HHAPIClient.rateLimitDelay(header: "invalid", now: now, attempt: 1), 2)
+        XCTAssertEqual(HHAPIClient.rateLimitDelay(header: "-1", now: now, attempt: 0), 1)
+        XCTAssertEqual(HHAPIClient.rateLimitDelay(header: " 17 ", now: now, attempt: 0), 17)
+        XCTAssertEqual(HHAPIClient.rateLimitDelay(header: "Thu, 01 Jan 1970 00:00:17 GMT", now: now, attempt: 0), 17)
+        XCTAssertEqual(HHAPIClient.rateLimitDelay(header: "Wed, 31 Dec 1969 23:59:59 GMT", now: now, attempt: 1), 2)
+        XCTAssertNil(HHAPIClient.rateLimitDelay(header: "Thu, 01 Jan 1970 00:01:01 GMT", now: now, attempt: 0))
+    }
+
+    func testRateLimitRetryUsesExpectedBackoffAndCanBeDisabledForLiveBudget() async throws {
+        let waits = RetryWaitRecorder()
+        var requests = 0
+        URLProtocolStub.handler = { _ in
+            requests += 1
+            if requests <= 2 { return (429, [:], Data(#"{"errors":[]}"#.utf8)) }
+            return (200, [:], Data(#"{"items":[],"found":0,"pages":0,"page":0,"per_page":100}"#.utf8))
+        }
+        let client = HTTPClientFactory.make(maximumRateLimitRetries: 99, retrySleep: { await waits.append($0) })
+        _ = try await client.searchVacancies(.init(employerID: "3529"))
+        let delays = await waits.values
+        XCTAssertEqual(delays, [1_000_000_000, 2_000_000_000])
+        XCTAssertEqual(requests, 3)
+        requests = 0
+        let noRetries = HTTPClientFactory.make(maximumRateLimitRetries: 0)
+        do { _ = try await noRetries.searchVacancies(.init(employerID: "3529")); XCTFail("Expected rate limit") }
+        catch { XCTAssertEqual(requests, 1) }
+    }
+
+    func testRateLimitWaitCancellationStopsRetriesAndReleasesSharedGate() async throws {
+        let waiting = expectation(description: "Entered retry delay")
+        var requests = 0
+        URLProtocolStub.handler = { _ in
+            requests += 1
+            if requests == 1 { return (429, [:], Data(#"{"errors":[]}"#.utf8)) }
+            return (200, [:], Data(#"{"items":[],"found":0,"pages":0,"page":0,"per_page":100}"#.utf8))
+        }
+        let client = HTTPClientFactory.make(retrySleep: { _ in
+            waiting.fulfill()
+            try await Task.sleep(nanoseconds: 60_000_000_000)
+        })
+        let task = Task { try await client.searchVacancies(.init(employerID: "3529")) }
+        await fulfillment(of: [waiting], timeout: 2)
+        task.cancel()
+        do { _ = try await task.value; XCTFail("Expected cancellation") }
+        catch is CancellationError {} catch { XCTFail("Unexpected error: \(error)") }
+        XCTAssertEqual(requests, 1)
+        _ = try await client.searchVacancies(.init(employerID: "3529"))
+        XCTAssertEqual(requests, 2)
+    }
+
+    func testAPIDoesNotRetryNonRateLimitHTTPOrTransportFailures() async {
+        let failures: [(Int, HHAPIError)] = [
+            (400, .requestFailed(statusCode: 400, message: nil)),
+            (404, .requestFailed(statusCode: 404, message: nil)),
+            (403, .forbidden(requestID: nil)),
+            (503, .requestFailed(statusCode: 503, message: nil))
+        ]
+        for (status, expected) in failures {
+            var requests = 0
+            let client = makeHTTPClient { _ in
+                requests += 1
+                return (status, ["Retry-After": "17"], Data(#"{"errors":[]}"#.utf8))
+            }
+            await assertAPIError(client, equals: expected)
+            XCTAssertEqual(requests, 1, "HTTP \(status) must finish without automatic retries")
+        }
+        for code in [URLError.Code.timedOut, .networkConnectionLost] {
+            var requests = 0
+            let client = makeHTTPClient { _ in
+                requests += 1
+                throw URLError(code)
+            }
+            do {
+                _ = try await client.searchVacancies(.init(employerID: "3529"))
+                XCTFail("Expected transport failure")
+            } catch let error as URLError {
+                XCTAssertEqual(error.code, code)
+            } catch {
+                XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertEqual(requests, 1, "Transport failure must finish without automatic retries")
         }
     }
 
@@ -537,6 +1143,84 @@ final class HHVacancySberTests: XCTestCase {
     }
 
     @MainActor
+    func testHidingExpandedVacancyCancelsInFlightDetailsAndAllowsReload() async throws {
+        for hide in ["employer", "region", "favorites"] {
+            let started = expectation(description: "detail suspended: \(hide)")
+            let cancelled = expectation(description: "detail task cancelled: \(hide)")
+            let resume = TestAsyncSignal()
+            let client = MockAPIClient(mode: .simple, beforeFirstDetailResponse: {
+                started.fulfill()
+                await resume.wait()
+                do { try Task.checkCancellation() }
+                catch { cancelled.fulfill(); throw error }
+            })
+            let model = VacancySearchViewModel(
+                apiClient: client,
+                employerStore: TestEmployerStore(entries: [.init(id: "3529", name: "СБЕР", comment: "test")]),
+                areaStore: AreaDirectoryStore(fileURL: temporaryDirectory().appendingPathComponent("areas.json"))
+            )
+            await model.search()
+            model.toggleExplanation(for: "3529-vacancy")
+            await fulfillment(of: [started], timeout: 2)
+            XCTAssertTrue(model.results[0].isDetailLoading)
+
+            switch hide {
+            case "employer": model.selectedEmployerID = "2798"
+            case "region": model.selectedRegionID = "remote"
+            default: model.displayMode = .favorites
+            }
+            XCTAssertNil(model.expandedVacancyID)
+            await resume.signal()
+            await fulfillment(of: [cancelled], timeout: 2)
+            for _ in 0..<1000 where model.results[0].isDetailLoading {
+                try await Task.sleep(nanoseconds: 1_000_000)
+            }
+            XCTAssertFalse(model.results[0].isDetailLoading)
+            XCTAssertFalse(model.results[0].isDetailLoaded, hide)
+            XCTAssertNil(model.results[0].detailErrorMessage)
+
+            model.displayMode = .all
+            model.selectedEmployerID = "all"
+            model.selectedRegionID = "all"
+            await model.loadVacancyDetails(id: "3529-vacancy")
+            let requestCount = await client.detailRequestCount
+            XCTAssertEqual(requestCount, 2, "Cancelled response must not populate the session cache")
+            XCTAssertTrue(model.results[0].isDetailLoaded)
+        }
+    }
+
+    @MainActor
+    func testFilterChangeKeepingExpandedVacancyVisiblePreservesInFlightDetails() async throws {
+        let started = expectation(description: "visible detail suspended")
+        let resume = TestAsyncSignal()
+        let client = MockAPIClient(mode: .simple, beforeFirstDetailResponse: {
+            started.fulfill()
+            await resume.wait()
+            try Task.checkCancellation()
+        })
+        let model = VacancySearchViewModel(
+            apiClient: client,
+            employerStore: TestEmployerStore(entries: [.init(id: "3529", name: "СБЕР", comment: "test")]),
+            areaStore: AreaDirectoryStore(fileURL: temporaryDirectory().appendingPathComponent("areas.json"))
+        )
+        await model.search()
+        model.toggleExplanation(for: "3529-vacancy")
+        await fulfillment(of: [started], timeout: 2)
+        model.selectedEmployerID = "3529"
+        model.selectedRegionID = "subject:1"
+        XCTAssertEqual(model.expandedVacancyID, "3529-vacancy")
+        await resume.signal()
+        for _ in 0..<1000 where model.results[0].isDetailLoading {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertFalse(model.results[0].isDetailLoading)
+        XCTAssertTrue(model.results[0].isDetailLoaded)
+        XCTAssertNil(model.results[0].detailErrorMessage)
+        let requestCount = await client.detailRequestCount
+        XCTAssertEqual(requestCount, 1)
+    }
+
+    @MainActor
     func testAllAndPersistedFavoritesAreAlwaysOrderedNewestFirst() async throws {
         let employerStore = TestEmployerStore(entries: [
             .init(id: "2798", name: "СберРешения", comment: "test"),
@@ -705,6 +1389,38 @@ final class HHVacancySberTests: XCTestCase {
         XCTAssertEqual(store.saveCount, 1)
         XCTAssertNotNil(store.lastSaved.first?.archiveCheckedAt)
         XCTAssertNil(store.lastSaved.last?.archiveCheckedAt)
+        XCTAssertEqual(store.lastSaved, model.favorites)
+    }
+
+    @MainActor
+    func testArchiveCheckRevalidatesFavoriteIndexAfterRemovalDuringRequest() async throws {
+        let blocked = expectation(description: "first archive request suspended")
+        let records = ["first", "second"].map { id in
+            FavoriteVacancyRecord(
+                result: statisticsVacancy(id: id, date: nil),
+                favoritedAt: .distantPast,
+                updatedAt: .distantPast
+            )
+        }
+        let store = SlowRecordingFavoriteStore(favorites: records)
+        let client = SuspendedEnrichmentClient(onFirstRequest: { blocked.fulfill() })
+        let model = VacancySearchViewModel(
+            apiClient: client,
+            employerStore: TestEmployerStore(entries: []),
+            favoritesStore: store
+        )
+        await model.loadPersistenceIfNeeded()
+
+        let check = Task { await model.checkArchiveStatusesIfNeeded() }
+        await fulfillment(of: [blocked], timeout: 2)
+        model.toggleFavorite(id: "first")
+        await client.resumeFirstRequest()
+        await check.value
+        await model.waitForPendingFavoritesSaves()
+
+        XCTAssertEqual(model.favorites.map(\.id), ["second"])
+        XCTAssertEqual(model.favorites.first?.isArchived, true)
+        XCTAssertNotNil(model.favorites.first?.archiveCheckedAt)
         XCTAssertEqual(store.lastSaved, model.favorites)
     }
 
@@ -1013,6 +1729,11 @@ final class HHVacancySberTests: XCTestCase {
         XCTAssertEqual(pageCount, 101)
         XCTAssertEqual(progressValues.first, .init(completedVacancies: 1, totalVacancies: 101))
         XCTAssertEqual(progressValues.last, .init(completedVacancies: 101, totalVacancies: 101))
+        XCTAssertTrue(progressValues.allSatisfy { $0.totalVacancies == 101 })
+        XCTAssertTrue(zip(progressValues, progressValues.dropFirst()).allSatisfy {
+            $0.completedVacancies <= $1.completedVacancies
+        })
+        XCTAssertEqual(progressValues.filter { $0.completedVacancies == 101 }.count, 1)
         XCTAssertTrue(progressWasOnMainThread)
 
         let pdfs = try FileManager.default.contentsOfDirectory(
@@ -1371,6 +2092,23 @@ final class HHVacancySberTests: XCTestCase {
         XCTAssertTrue(document.string.contains("В архиве: 1"))
         XCTAssertTrue(document.string.contains("С указанной зарплатой: 1"))
         XCTAssertTrue(document.string.contains("Без корректной даты размещения: 2"))
+        let vacancyRowStringRange = try XCTUnwrap(
+            document.string.range(of: "1. Вакансия fractional: 03.09.2026 08:00")
+        )
+        let vacancyRowRange = NSRange(vacancyRowStringRange, in: document.string)
+        document.enumerateAttribute(.font, in: vacancyRowRange) { value, _, _ in
+            guard let font = value as? NSFont else {
+                XCTFail("В строке вакансии должен быть задан шрифт")
+                return
+            }
+            XCTAssertEqual(font.pointSize, 7.5)
+            XCTAssertFalse(font.fontDescriptor.symbolicTraits.contains(.bold))
+        }
+        let vacancyRowStyle = try XCTUnwrap(
+            document.attribute(.paragraphStyle, at: vacancyRowRange.location, effectiveRange: nil) as? NSParagraphStyle
+        )
+        XCTAssertEqual(vacancyRowStyle.lineSpacing, 3)
+        XCTAssertEqual(vacancyRowStyle.paragraphSpacing, 5)
         let pages = FavoriteVacanciesPDFExporter.pages(for: document)
         XCTAssertEqual(pages.map(\.content.string).joined(), document.string)
         let data = try FavoriteVacanciesPDFExporter.pdfData(for: pages)
@@ -1687,6 +2425,38 @@ final class HHVacancySberTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: url), original)
         try await worker.exportStatistics(report: report, destination: url)
         XCTAssertTrue(try extractedStatisticsText(XCTUnwrap(PDFDocument(url: url))).contains("Вакансия retry:"))
+    }
+
+    func testOptInPDFRenderingMetrics() throws {
+        try XCTSkipUnless(
+            ProcessInfo.processInfo.environment["HH_RUN_PERFORMANCE_TESTS"] == "1",
+            "Set HH_RUN_PERFORMANCE_TESTS=1 for the five-iteration SDK metrics run."
+        )
+        let paragraph = "Надёжность, производительность и Unicode: ёж, Ω.\n"
+        let document = NSAttributedString(
+            string: String(repeating: paragraph, count: 8_000),
+            attributes: [.font: NSFont.systemFont(ofSize: 9.5)]
+        )
+        let pages = FavoriteVacanciesPDFExporter.pages(for: document)
+        XCTAssertGreaterThan(pages.count, 10)
+        let options = XCTMeasureOptions()
+        options.iterationCount = 5
+        var renderedByteCount = 0
+        var renderingError: Error?
+        measure(
+            metrics: [XCTClockMetric(), XCTCPUMetric(), XCTMemoryMetric()],
+            options: options
+        ) {
+            autoreleasepool {
+                do {
+                    renderedByteCount = try FavoriteVacanciesPDFExporter.pdfData(for: pages).count
+                } catch {
+                    renderingError = error
+                }
+            }
+        }
+        if let renderingError { throw renderingError }
+        XCTAssertGreaterThan(renderedByteCount, 0)
     }
 
     private var statisticsFilterRows: [(id: String, employer: String, region: String)] {
@@ -2191,7 +2961,11 @@ private actor MockAPIClient: HHVacancyAPIClient {
     private(set) var requestedDetailIDs: [String] = []
     private(set) var searchRequestCount = 0
     private var shouldFailSearch = false
-    init(mode: Mode) { self.mode = mode }
+    private let beforeFirstDetailResponse: (@Sendable () async throws -> Void)?
+    init(mode: Mode, beforeFirstDetailResponse: (@Sendable () async throws -> Void)? = nil) {
+        self.mode = mode
+        self.beforeFirstDetailResponse = beforeFirstDetailResponse
+    }
     func enableDelayedSearchFailure() { shouldFailSearch = true }
     nonisolated func validateVacanciesAccess() throws {}
     func areaTree() async throws -> HHAreaNode {
@@ -2224,6 +2998,7 @@ private actor MockAPIClient: HHVacancyAPIClient {
             throw HHAPIError.requestFailed(statusCode: 404, message: nil)
         }
         detailRequestCount += 1
+        if detailRequestCount == 1 { try await beforeFirstDetailResponse?() }
         if case .delayedArchive = mode {
             try await Task.sleep(nanoseconds: 100_000_000)
         }
@@ -2358,6 +3133,11 @@ private actor SuspendedEnrichmentClient: HHVacancyAPIClient {
 
 private struct FixedSummaryAPIClient: HHVacancyAPIClient {
     let rows: [HHVacancySummary]
+    private let detailLoader: (@Sendable (String) async throws -> HHVacancyDetails)?
+    init(rows: [HHVacancySummary], detailLoader: (@Sendable (String) async throws -> HHVacancyDetails)? = nil) {
+        self.rows = rows
+        self.detailLoader = detailLoader
+    }
     func validateVacanciesAccess() throws {}
     func searchVacancies(_ request: HHVacancySearchRequest) async throws -> HHVacancySearchResponse {
         .init(items: rows, found: rows.count, pages: 1, page: 0, perPage: request.perPage)
@@ -2365,6 +3145,7 @@ private struct FixedSummaryAPIClient: HHVacancyAPIClient {
     func areaTree() async throws -> HHAreaNode { .init(id: "113", name: "Россия", areas: [.init(id: "1", name: "Москва")]) }
     func vacancyDictionaries() async throws -> HHVacancyDictionaries { .init(experience: [], workFormat: [], schedule: []) }
     func vacancyDetails(id: String) async throws -> HHVacancyDetails {
+        if let detailLoader { return try await detailLoader(id) }
         XCTFail("Search must not enrich"); throw HHAPIError.invalidResponse
     }
 }
@@ -2442,14 +3223,25 @@ private extension NSLock {
     }
 }
 
+private actor RetryWaitRecorder {
+    var values: [UInt64] = []
+    func append(_ value: UInt64) { values.append(value) }
+}
+
 private enum HTTPClientFactory {
-    static func make() -> HHAPIClient {
+    static func make(
+        maximumRateLimitRetries: Int = 2,
+        requestGate: HHRequestGate? = nil,
+        retrySleep: @escaping @Sendable (UInt64) async throws -> Void = { _ in }
+    ) -> HHAPIClient {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [URLProtocolStub.self]
         return HHAPIClient(
             session: URLSession(configuration: configuration),
             accessTokenProvider: FixedTokenProvider(),
-            requestGate: HHRequestGate(minimumDelayNanoseconds: 0)
+            requestGate: requestGate ?? HHRequestGate(minimumDelayNanoseconds: 0),
+            maximumRateLimitRetries: maximumRateLimitRetries,
+            retrySleep: retrySleep
         )
     }
 }
@@ -2474,4 +3266,124 @@ private final class URLProtocolStub: URLProtocol {
         }
     }
     override func stopLoading() {}
+}
+
+
+private enum LiveCancellationTransition: Int {
+    case employer = 0, region = 1, favorites = 2
+}
+
+private enum LiveCancellationFailure: Error {
+    case stopped, budgetExhausted, responseShape, http(Int), transport(Int), apiFailure
+}
+
+private final class LiveCancellationHTTPObserver: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    private let lock = NSLock()
+    private var records: [String] = []
+
+    var journal: String {
+        lock.lock(); defer { lock.unlock() }
+        return records.joined(separator: "\n")
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didFinishCollecting metrics: URLSessionTaskMetrics) {
+        let formatter = ISO8601DateFormatter()
+        let entries = metrics.transactionMetrics.map { transaction in
+            let timestamp = formatter.string(from: transaction.requestStartDate ?? transaction.fetchStartDate ?? metrics.taskInterval.start)
+            let path = transaction.request.url?.path ?? "unknown"
+            let status = (transaction.response as? HTTPURLResponse).map { String($0.statusCode) } ?? "no-http-response"
+            return "\(timestamp) GET \(path) status=\(status)"
+        }
+        lock.lock(); records.append(contentsOf: entries); lock.unlock()
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest,
+                    completionHandler: @escaping (URLRequest?) -> Void) {
+        // No additional redirect request outside the live group's explicit budget.
+        completionHandler(nil)
+    }
+}
+
+@MainActor
+private final class LiveCancellationRun {
+    static let shared = LiveCancellationRun()
+    private let observer: LiveCancellationHTTPObserver
+    private let session: URLSession
+    private let client: HHAPIClient
+    private var rows: [HHVacancySummary]?
+    private(set) var stopped = false
+    private(set) var requestCount = 0
+    private var attempts: [String] = []
+    var journal: String { (attempts + [observer.journal]).joined(separator: "\n") }
+
+    private init() {
+        let observer = LiveCancellationHTTPObserver()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 15
+        configuration.timeoutIntervalForResource = 20
+        configuration.urlCache = nil
+        let session = URLSession(configuration: configuration, delegate: observer, delegateQueue: nil)
+        self.observer = observer
+        self.session = session
+        self.client = HHAPIClient(session: session, requestGate: HHRequestGate(minimumDelayNanoseconds: 1_000_000_000), maximumRateLimitRetries: 0)
+    }
+
+    private func begin(path: String) throws {
+        guard !stopped else { throw LiveCancellationFailure.stopped }
+        guard requestCount < 4 else { throw LiveCancellationFailure.budgetExhausted }
+        requestCount += 1
+        attempts.append("\(ISO8601DateFormatter().string(from: Date())) attempt=\(requestCount) GET \(path)")
+    }
+
+    private func stop(after error: Error) -> LiveCancellationFailure {
+        stopped = true
+        let safe: LiveCancellationFailure
+        if let error = error as? URLError {
+            safe = .transport(error.code.rawValue)
+        } else if let error = error as? HHAPIError {
+            switch error {
+            case .forbidden: safe = .http(403)
+            case .rateLimited: safe = .http(429)
+            case .unauthorized: safe = .http(401)
+            case .requestFailed(let status, _): safe = .http(status)
+            default: safe = .apiFailure
+            }
+        } else {
+            safe = .responseShape
+        }
+        attempts.append("Group stopped: \(safe)")
+        return safe
+    }
+
+    func searchRows() async throws -> [HHVacancySummary] {
+        if let rows { return rows }
+        try begin(path: "/vacancies")
+        do {
+            let response = try await client.searchVacancies(.init(employerID: "3529", areaID: "1", perPage: 3))
+            let parser = HHPublicationDateParser()
+            guard response.items.count <= 3,
+                  Set(response.items.map(\.id)).count == response.items.count,
+                  response.items.allSatisfy({ !$0.id.isEmpty && !$0.name.isEmpty && $0.employer?.id == "3529"
+                      && parser.date(from: $0.publishedAt) != nil }) else {
+                throw LiveCancellationFailure.responseShape
+            }
+            rows = response.items
+            return response.items
+        } catch { throw stop(after: error) }
+    }
+
+    func detail(id: String) async throws -> HHVacancyDetails {
+        try begin(path: "/vacancies/\(id)")
+        do {
+            let response = try await client.vacancyDetails(id: id)
+            let parser = HHPublicationDateParser()
+            guard response.id == id, !response.name.isEmpty,
+                  parser.date(from: response.publishedAt) != nil else {
+                throw LiveCancellationFailure.responseShape
+            }
+            return response
+        } catch { throw stop(after: error) }
+    }
 }

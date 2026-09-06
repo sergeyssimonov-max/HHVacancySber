@@ -46,6 +46,34 @@ struct RuntimeBenchmarks {
             if mode == "enrichment-repeat" { await model.exportFavoriteVacanciesPDF() }
             result["detail_requests"] = await client.requests
             result["export_calls"] = exporter.calls
+        } else if mode == "search" {
+            let client = FixtureClient(mode: mode, searchCount: count)
+            let service = VacancyCollectionService(client: client)
+            let areas = try AreaDirectoryIndex(root: .init(id: "113", name: "Россия"))
+            let collected = try await service.collect(
+                employers: [.init(id: "3529", name: "СБЕР", comment: "benchmark")],
+                areas: areas,
+                progress: { _ in }
+            )
+            precondition(collected.count == count)
+            result["search_requests"] = await client.requests
+        } else if mode == "archive" {
+            let client = FixtureClient(mode: mode)
+            let records = values.map {
+                FavoriteVacancyRecord(result: $0, favoritedAt: .distantPast, updatedAt: .distantPast)
+            }
+            let store = InMemoryFavoriteVacancyStore(favorites: records)
+            let model = VacancySearchViewModel(
+                apiClient: client,
+                employerStore: Employers(),
+                areaStore: AreaDirectoryStore(fileURL: directory.appendingPathComponent("areas.json")),
+                favoritesStore: store,
+                currentDate: { Date(timeIntervalSince1970: 1_788_400_000) }
+            )
+            await model.checkArchiveStatusesIfNeeded()
+            await model.waitForPendingFavoritesSaves()
+            precondition(model.favorites.allSatisfy { $0.archiveCheckedAt != nil })
+            result["detail_requests"] = await client.requests
         } else {
             let worker = PDFExportWorker(fileManager: PDFFileManager(.default))
             var pages = 0
@@ -176,16 +204,39 @@ private struct Employers: EmployerConfigurationStoring {
 
 private actor FixtureClient: HHVacancyAPIClient {
     let mode: String
+    let searchCount: Int
     var requests = 0
-    init(mode: String) { self.mode = mode }
+    init(mode: String, searchCount: Int = 0) {
+        self.mode = mode
+        self.searchCount = searchCount
+    }
     nonisolated func validateVacanciesAccess() throws {}
     func vacancyDetails(id: String) async throws -> HHVacancyDetails {
         requests += 1
         if mode == "enrichment-cancel" { throw CancellationError() }
         if mode == "enrichment-limit" { throw HHAPIError.rateLimited(retryAfterSeconds: 60) }
-        return RuntimeBenchmarks.vacancy(Int(id) ?? 0, paragraphs: 12).details
+        let value = RuntimeBenchmarks.vacancy(Int(id) ?? 0, paragraphs: 12)
+        guard mode == "archive" else { return value.details }
+        return .init(
+            id: value.id,
+            name: value.name,
+            employer: value.details.employer,
+            area: value.details.area,
+            salary: value.details.salary,
+            alternateURL: value.details.alternateURL,
+            description: value.details.description,
+            archived: true
+        )
     }
-    func searchVacancies(_ request: HHVacancySearchRequest) async throws -> HHVacancySearchResponse { fatalError("No live search") }
+    func searchVacancies(_ request: HHVacancySearchRequest) async throws -> HHVacancySearchResponse {
+        guard mode == "search" else { fatalError("No live search") }
+        requests += 1
+        let start = min(searchCount, request.page * request.perPage)
+        let end = min(searchCount, start + request.perPage)
+        let items = (start..<end).map { RuntimeBenchmarks.vacancy($0, paragraphs: 1).summary }
+        let pages = max(1, Int(ceil(Double(searchCount) / Double(request.perPage))))
+        return .init(items: items, found: searchCount, pages: pages, page: request.page, perPage: request.perPage)
+    }
     func areaTree() async throws -> HHAreaNode { fatalError("No live areas") }
     func vacancyDictionaries() async throws -> HHVacancyDictionaries { fatalError("No live dictionaries") }
 }

@@ -20,6 +20,45 @@ final class HHVacancySberUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Полное описание вакансии."].waitForExistence(timeout: 5))
     }
 
+    func testFilteringExpandedVacancyHidesDetailsAndAllowsReopening() {
+        let app = launch()
+        app.buttons["searchVacanciesButton"].click()
+        XCTAssertTrue(app.staticTexts["vacancyTitle.ui-1"].waitForExistence(timeout: 8))
+        app.buttons["expandVacancy.ui-1"].click()
+        XCTAssertTrue(app.staticTexts["Полное описание вакансии."].waitForExistence(timeout: 5))
+
+        choose("СберРешения", from: "employerFilterPicker", in: app)
+        XCTAssertTrue(app.staticTexts["vacancyTitle.ui-3"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["expandVacancy.ui-1"].exists)
+        XCTAssertFalse(app.staticTexts["Полное описание вакансии."].exists)
+        let hidden = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
+        hidden.name = "Expanded vacancy hidden by employer filter"
+        hidden.lifetime = .keepAlways
+        add(hidden)
+
+        choose("Все работодатели", from: "employerFilterPicker", in: app)
+        let details = app.buttons["expandVacancy.ui-1"]
+        XCTAssertTrue(details.waitForExistence(timeout: 5))
+        XCTAssertEqual(details.label, "Подробнее")
+        details.click()
+        XCTAssertTrue(app.staticTexts["Полное описание вакансии."].waitForExistence(timeout: 5))
+        let reopened = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
+        reopened.name = "Vacancy details reopened after clearing filter"
+        reopened.lifetime = .keepAlways
+        add(reopened)
+    }
+
+    func testInitialRefreshButtonMatchesToolbarButton() {
+        let app = launch()
+        let toolbarButton = app.buttons["searchVacanciesButton"]
+        let emptyButton = app.buttons["emptyRefreshVacanciesButton"]
+        XCTAssertTrue(toolbarButton.waitForExistence(timeout: 5))
+        XCTAssertTrue(emptyButton.exists)
+        XCTAssertEqual(emptyButton.label, "Обновить выборку")
+        XCTAssertEqual(emptyButton.frame.width, toolbarButton.frame.width, accuracy: 2)
+        XCTAssertEqual(emptyButton.frame.height, toolbarButton.frame.height, accuracy: 2)
+    }
+
     func testToolbarUsesOneAlignedRowWithoutExternalFilterLabels() {
         let app = launch()
         let mode = app.descendants(matching: .any)["vacancyListModePicker"]
@@ -51,18 +90,18 @@ final class HHVacancySberUITests: XCTestCase {
         let app = launch()
         app.buttons["searchVacanciesButton"].click()
         XCTAssertTrue(app.staticTexts["vacancyTitle.ui-1"].waitForExistence(timeout: 8))
-        XCTAssertTrue(app.staticTexts["Показано вакансий: 3"].exists)
+        XCTAssertEqual(app.staticTexts["displayedVacancyCount"].value as? String, "Показано вакансий: 3")
 
         choose("СберРешения", from: "employerFilterPicker", in: app)
 
         XCTAssertTrue(app.staticTexts["vacancyTitle.ui-3"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Показано вакансий: 1"].exists)
+        XCTAssertEqual(app.staticTexts["displayedVacancyCount"].value as? String, "Показано вакансий: 1")
         XCTAssertFalse(app.staticTexts["vacancyTitle.ui-1"].exists)
         XCTAssertFalse(app.staticTexts["vacancyTitle.ui-2"].exists)
 
         choose("Все работодатели", from: "employerFilterPicker", in: app)
         XCTAssertTrue(app.staticTexts["vacancyTitle.ui-1"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Показано вакансий: 3"].exists)
+        XCTAssertEqual(app.staticTexts["displayedVacancyCount"].value as? String, "Показано вакансий: 3")
     }
 
     func testRegionDropdownCombinesWithEmployerAndCanShowNoMatches() {
@@ -73,7 +112,7 @@ final class HHVacancySberUITests: XCTestCase {
         choose("СБЕР", from: "employerFilterPicker", in: app)
         choose("Москва", from: "regionFilterPicker", in: app)
         XCTAssertTrue(app.staticTexts["vacancyTitle.ui-1"].exists)
-        XCTAssertTrue(app.staticTexts["Показано вакансий: 1"].exists)
+        XCTAssertEqual(app.staticTexts["displayedVacancyCount"].value as? String, "Показано вакансий: 1")
         XCTAssertFalse(app.staticTexts["vacancyTitle.ui-2"].exists)
         XCTAssertFalse(app.staticTexts["vacancyTitle.ui-3"].exists)
 
@@ -114,7 +153,7 @@ final class HHVacancySberUITests: XCTestCase {
         XCTAssertEqual(report.frame.height, app.buttons["Экспорт в PDF"].firstMatch.frame.height, accuracy: 1)
         choose("СБЕР", from: "employerFilterPicker", in: app)
         choose("Москва", from: "regionFilterPicker", in: app)
-        XCTAssertTrue(app.staticTexts["Показано вакансий: 1"].exists)
+        XCTAssertEqual(app.staticTexts["displayedVacancyCount"].value as? String, "Показано вакансий: 1")
         XCTAssertTrue(report.isEnabled)
         XCTAssertEqual(report.frame.maxX, refresh.frame.maxX, accuracy: 2)
         let attachment = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
@@ -159,7 +198,27 @@ final class HHVacancySberUITests: XCTestCase {
         XCTAssertTrue(report.isEnabled)
         XCTAssertEqual(report.label, "Статистика в PDF")
         XCTAssertEqual(report.frame.height, 32, accuracy: 2)
-        XCTAssertTrue(app.staticTexts["Показано вакансий: 0"].exists)
+        XCTAssertEqual(app.staticTexts["displayedVacancyCount"].value as? String, "Показано вакансий: 0")
+    }
+
+    func testInformationSecurityLabelTakesPriorityAndPersistsInFavorites() {
+        let app = launch(scenario: "security")
+        app.buttons["searchVacanciesButton"].click()
+        XCTAssertTrue(app.staticTexts["informationSecurityLabel.ui-security"].waitForExistence(timeout: 8))
+        XCTAssertFalse(app.staticTexts["technologyBadge.ui-security"].exists)
+        XCTAssertTrue(app.staticTexts["technologyBadge.ui-1"].exists)
+        XCTAssertFalse(app.staticTexts["informationSecurityLabel.ui-2"].exists)
+        app.buttons["favoriteVacancy.ui-security"].click()
+        app.buttons["expandVacancy.ui-security"].click()
+        XCTAssertTrue(app.staticTexts["Развиваем средства защиты данных и безопасные цифровые сервисы."].waitForExistence(timeout: 5))
+        let attachment = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
+        attachment.name = "Security card with plain label and full description"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        app.radioButtons.matching(NSPredicate(format: "label BEGINSWITH %@", "Избранное")).firstMatch.click()
+        XCTAssertTrue(app.staticTexts["informationSecurityLabel.ui-security"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["technologyBadge.ui-security"].exists)
+        XCTAssertTrue(app.buttons["favoriteVacancy.ui-security"].label.contains("В избранном"))
     }
 
     private func choose(_ option: String, from pickerIdentifier: String, in app: XCUIApplication) {

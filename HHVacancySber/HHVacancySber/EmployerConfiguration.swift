@@ -4,6 +4,19 @@ struct EmployerConfigurationEntry: Codable, Equatable, Identifiable, Sendable {
     let id: String
     let name: String
     let comment: String
+    let jointVenture: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, comment
+        case jointVenture = "joint_venture"
+    }
+
+    init(id: String, name: String, comment: String, jointVenture: Bool? = nil) {
+        self.id = id
+        self.name = name
+        self.comment = comment
+        self.jointVenture = jointVenture
+    }
 }
 
 struct EmployerConfiguration: Codable, Equatable, Sendable {
@@ -76,6 +89,25 @@ struct EmployerConfigurationStore: EmployerConfigurationStoring, @unchecked Send
             _ = try JSONDecoder().decode(EmployerConfiguration.self, from: data).validated()
             try data.write(to: fileURL, options: .atomic)
         }
-        return try JSONDecoder().decode(EmployerConfiguration.self, from: Data(contentsOf: fileURL)).validated()
+        let current = try JSONDecoder().decode(EmployerConfiguration.self, from: Data(contentsOf: fileURL)).validated()
+        // Upgrade only the exact shipped default. Any user edit, including a
+        // comment, removal or reordering, makes the runtime file authoritative.
+        if let bundledDefaultURL {
+            for legacyName in ["employers.legacy-v1.json", "employers.legacy-44.json"] {
+                let legacyURL = bundledDefaultURL.deletingLastPathComponent().appendingPathComponent(legacyName)
+                if fileManager.fileExists(atPath: legacyURL.path) {
+                    let legacy = try JSONDecoder().decode(EmployerConfiguration.self, from: Data(contentsOf: legacyURL)).validated()
+                    if current == legacy {
+                        let data = try Data(contentsOf: bundledDefaultURL)
+                        let updated = try JSONDecoder().decode(EmployerConfiguration.self, from: data).validated()
+                        if updated != current {
+                            try data.write(to: fileURL, options: .atomic)
+                        }
+                        return updated
+                    }
+                }
+            }
+        }
+        return current
     }
 }

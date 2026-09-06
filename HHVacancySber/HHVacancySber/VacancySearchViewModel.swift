@@ -336,6 +336,7 @@ final class VacancySearchViewModel: ObservableObject {
         let due = currentDate().addingTimeInterval(-Self.archiveCheckInterval)
         var didUpdate = false
         var seenIDs = Set<String>()
+        var favoriteIndicesByID = makeFavoriteIndicesByID()
         let dueIDs: [String] = favorites.compactMap { favorite in
             guard (favorite.archiveCheckedAt ?? .distantPast) < due,
                   seenIDs.insert(favorite.id).inserted else { return nil }
@@ -344,11 +345,12 @@ final class VacancySearchViewModel: ObservableObject {
         for id in dueIDs {
             do {
                 let details = try await apiClient.vacancyDetails(id: id)
-                guard let archived = details.archived, let index = favorites.firstIndex(where: { $0.id == id }) else { continue }
+                guard let archived = details.archived,
+                      let index = favoriteIndex(for: id, cachedIndices: &favoriteIndicesByID) else { continue }
                 favorites[index].updateArchiveStatus(archived, checkedAt: currentDate())
                 didUpdate = true
             } catch let error as HHAPIError where error.isNotFound {
-                guard let index = favorites.firstIndex(where: { $0.id == id }) else { continue }
+                guard let index = favoriteIndex(for: id, cachedIndices: &favoriteIndicesByID) else { continue }
                 let archived = favorites[index].isArchived
                 favorites[index].updateArchiveStatus(archived, checkedAt: currentDate())
                 didUpdate = true
@@ -361,6 +363,22 @@ final class VacancySearchViewModel: ObservableObject {
             }
         }
         if didUpdate { persistFavorites() }
+    }
+
+    private func makeFavoriteIndicesByID() -> [String: Int] {
+        var result: [String: Int] = [:]
+        for (index, favorite) in favorites.enumerated() where result[favorite.id] == nil {
+            result[favorite.id] = index
+        }
+        return result
+    }
+
+    private func favoriteIndex(for id: String, cachedIndices: inout [String: Int]) -> Int? {
+        if let index = cachedIndices[id], favorites.indices.contains(index), favorites[index].id == id {
+            return index
+        }
+        cachedIndices = makeFavoriteIndicesByID()
+        return cachedIndices[id]
     }
 
     private func shouldStopArchiveCheckCycle(after error: HHAPIError) -> Bool {
@@ -525,7 +543,12 @@ final class VacancySearchViewModel: ObservableObject {
     }
 
     private func result(_ id: String) -> VacancySearchResult? { unfilteredResults.first { $0.id == id } }
-    private func reconcileExpanded() { if let id = expandedVacancyID, !displayedResults.contains(where: { $0.id == id }) { expandedVacancyID = nil } }
+    private func reconcileExpanded() {
+        if let id = expandedVacancyID, !displayedResults.contains(where: { $0.id == id }) {
+            expandedVacancyID = nil
+            detailTask?.cancel()
+        }
+    }
     private func normalizeFilters() {
         if !employerFilterOptions.contains(where: { $0.id == selectedEmployerID }) { selectedEmployerID = "all" }
         if !regionFilterOptions.contains(where: { $0.id == selectedRegionID }) { selectedRegionID = "all" }

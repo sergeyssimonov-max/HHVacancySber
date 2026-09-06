@@ -652,6 +652,12 @@ struct VacancySearchResult: Identifiable {
     let isArchived: Bool
     let archiveCheckedAt: Date?
     let exportDataNotice: String?
+    let isTechnologyRelated: Bool
+    let isInformationSecurityRelated: Bool
+
+    var field: VacancyField {
+        isInformationSecurityRelated ? .informationSecurity : (isTechnologyRelated ? .technology : .general)
+    }
 
     init(
         id: String,
@@ -677,6 +683,15 @@ struct VacancySearchResult: Identifiable {
         self.isArchived = isArchived ?? details.archived ?? false
         self.archiveCheckedAt = archiveCheckedAt
         self.exportDataNotice = exportDataNotice
+        let roles = (details.professionalRoles ?? []).compactMap(\.name)
+        let context = [summary.snippet?.plainText, details.description?.readableHTMLText]
+            .compactMap { $0 }.joined(separator: "\n")
+        self.isInformationSecurityRelated = VacancyInformationSecurityClassifier.matches(
+            title: details.name, roles: roles, context: context
+        )
+        self.isTechnologyRelated = isInformationSecurityRelated || VacancyTechnologyClassifier.matches(
+            title: details.name, roles: roles, context: context
+        )
     }
 
     var name: String {
@@ -774,4 +789,140 @@ extension String {
         return value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+}
+
+/// Local, deterministic classification. Employer names and generic office skills are
+/// deliberately excluded. Broad job names are accepted only in titles/role names;
+/// descriptions require an explicit technical field, not just “аналитика” or “IT”.
+enum VacancyTechnologyClassifier {
+    static func matches(title: String, roles: [String] = [], context: String = "") -> Bool {
+        matches(rolePattern, in: ([title] + roles).joined(separator: " "))
+            || matches(fieldPattern, in: ([title] + roles + [context]).joined(separator: " "))
+    }
+
+    private static func matches(_ pattern: NSRegularExpression, in text: String) -> Bool {
+        let normalized = text.lowercased().replacingOccurrences(of: "ё", with: "е")
+            .replacingOccurrences(of: "–", with: "-").replacingOccurrences(of: "‑", with: "-")
+        return pattern.firstMatch(in: normalized, range: NSRange(normalized.startIndex..., in: normalized)) != nil
+    }
+
+    private static func expression(_ alternatives: [String]) -> NSRegularExpression {
+        // Unicode boundaries prevent short acronyms matching inside unrelated words.
+        try! NSRegularExpression(pattern: "(?<![\\p{L}\\p{N}])(?:" + alternatives.joined(separator: "|") + ")(?![\\p{L}\\p{N}])")
+    }
+
+    private static let rolePattern = expression([
+        #"(?:it|ит|ict|икт|интернет|ai|ии|bi|qa|qc|ml|1с|1c|erp|crm|bpm|sql|dba|cto|cio|cdo)"#,
+        #"(?:разработчик|программист|тестировщик|аналитик|дата[ -]?саентист|дата[ -]?инженер|системотехник|биоинформатик)[а-я]*"#,
+        #"(?:архитектор[а-я]* (?:решени[а-я]*|данных|по|программ[а-я]*|информационн[а-я]*|предприяти[а-я]*)|solution[s]? architect|enterprise architect|data architect)"#,
+        #"(?:developer|programmer|tester|analyst|analytics|product[ -]+(?:manager|owner|designer)|scrum[ -]+master|agile[ -]+coach)"#,
+        #"(?:управлен[а-я]*|менеджер[а-я]*|владелец|руководител[а-я]*|дизайнер[а-я]*) (?:\S+ ){0,2}продукт[а-я]*"#,
+        #"(?:техническ[а-я]+ (?:поддержк[а-я]*|писател[а-я]*)|системн[а-я]+ администратор[а-я]*|сетев[а-я]+ инженер[а-я]*)"#,
+        #"(?:java|python|javascript|typescript|kotlin|swift|golang|scala|c\+\+|c#|[.]net|react|angular|vue|unity|unreal)"#
+    ])
+
+    private static let fieldPattern = expression([
+        #"(?:информационн[а-я]+ (?:технолог[а-я]*|систем[а-я]*|безопасност[а-я]*|и коммуникационн[а-я]+ технолог[а-я]*)|кибербезопасност[а-я]*|телеком[а-я]*)"#,
+        #"(?:frontend|backend|full[ -]?stack|front[ -]?end|back[ -]?end|devops|sre|mlops|llmops|dataops|finops|low[ -]?code|no[ -]?code|rpa|rag|llm|etl|elt|olap|lakehouse|hadoop|spark|kubernetes|[аa]нтифрод[а-я]*|пентест[а-я]*)"#,
+        #"(?:веб|web|мобильн[а-я]+|программного обеспечения|игр|1с|1c)[ -]*разработ[а-я]*|разработ[а-я]* (?:программ[а-я]*|по|игр|на 1[сc]|мобильн[а-я]+|веб[а-я]*)"#,
+        #"(?:системн[а-я]+ программирован[а-я]*|встраиваем[а-я]+ систем[а-я]*|embedded|software|firmware|game[ -]?(?:design|development))"#,
+        #"(?:архитектур[а-я]* (?:программ[а-я]*|решени[а-я]*|данных|предприяти[а-я]*)|корпоративн[а-я]+ архитектур[а-я]*|системн[а-я]+ интеграц[а-я]*|(?:внедрен[а-я]*|сопровожден[а-я]*) (?:информационн[а-я]+ систем[а-я]*|программн[а-я]+ обеспечен[а-я]*))"#,
+        #"(?:(?:ручн[а-я]+|автоматизированн[а-я]+|нагрузочн[а-я]+) тестирован[а-я]*|тестирован[а-я]* (?:по|программ[а-я]*)|quality assurance)"#,
+        #"(?:защит[а-я]* (?:информац[а-я]*|персональн[а-я]+ данных)|(?:безопасност[а-я]*|конфиденциальност[а-я]*) данных)"#,
+        #"(?:(?:платформенн[а-я]+|сетев[а-я]+|системн[а-я]+) инженери[а-я]*|(?:системн[а-я]+|сетев[а-я]+) администрирован[а-я]*|администрирован[а-я]* (?:баз[а-я]* данных|сервер[а-я]*)|облачн[а-я]+ (?:технолог[а-я]*|инфраструктур[а-я]*)|(?:it|ит)[ -]инфраструктур[а-я]*)"#,
+        #"(?:техническ[а-я]+ поддержк[а-я]*|техническ[а-я]+ писатель[а-я]*|technical (?:support|writer)|ux|ui|гейм[ -]?дизайн[а-я]*|дизайн[а-я]* интерфейс[а-я]*|продуктов[а-я]+ дизайн[а-я]*|компьютерн[а-я]+ график[а-я]*)"#,
+        #"(?:(?:управлен[а-я]*|менеджмент) (?:it|ит|продукт[а-я]*)|(?:it|ит)[ -](?:проект[а-я]*|менеджмент)|цифров[а-я]+ трансформац[а-я]*|автоматизац[а-я]* бизнес[ -]процесс[а-я]*|роботизац[а-я]* процесс[а-я]*|методолог[а-я]* разработ[а-я]*)"#,
+        #"(?:(?:системн[а-я]+|бизнес|количественн[а-я]+) [аa]нализ[а-я]*|бизнес-анализ[а-я]*|(?:операционн[а-я]+|продуктов[а-я]+|финансов[а-я]+|hr|риск|предиктивн[а-я]+|самообслуживаем[а-я]+)[ -]аналитик[а-я]*|[аa]/[вb][ -]тест[а-я]*|анализ[а-я]* временн[а-я]+ ряд[а-я]*|process mining|бизнес[ -]интеллект[а-я]*)"#,
+        #"(?:(?:работ[а-я]*|сбор[а-я]*|подготовк[а-я]*|очистк[а-я]*|обработк[а-я]*|анализ[а-я]*|аналитик[а-я]*|исследован[а-я]*|визуализац[а-я]*|моделирован[а-я]*|инженери[а-я]*|интеграц[а-я]*|миграц[а-я]*|хранилищ[а-я]*|витрин[а-я]*|озер[а-я]*|платформ[а-я]*|качеств[а-я]*|управлен[а-я]*|каталог[а-я]*|происхожден[а-я]*|наблюдаемост[а-я]*|стратеги[а-я]*|разметк[а-я]*|аннотирован[а-я]*) (?:с )?данны[а-я]*|(?:больш[а-я]*|неструктурированн[а-я]*|полуструктурированн[а-я]*|графов[а-я]*|синтетическ[а-я]*) данны[а-я]*)"#,
+        #"(?:потоков[а-я]+ обработк[а-я]* данных|контрол[а-я]* качеств[а-я]* \(qa\)|отчетност[а-я]* и дашборд[а-я]*)"#,
+        #"(?:data (?:science|scientist|engineer[a-z]*|analyst|analytics|governance|quality|warehouse|lake|platform|mining)|big data|business intelligence|дашборд[а-я]*|dashboard[a-z]*|аналитическ[а-я]+ (?:систем[а-я]*|инженери[а-я]*)|мастер[ -]данны[а-я]*|нормативно[ -]справочн[а-я]+ информац[а-я]*|метаданны[а-я]*|графов[а-я]+ аналитик[а-я]*|граф[а-я]* знани[а-я]*|инженери[а-я]* признак[а-я]*|наук[а-я]* о данных|статистическ[а-я]+ моделирован[а-я]*)"#,
+        #"(?:(?:машинн[а-я]+|глубок[а-я]+) обучен[а-я]*|искусственн[а-я]+ интеллект[а-я]*|больш[а-я]+ языков[а-я]+ модел[а-я]*|векторн[а-я]+ поиск[а-я]*|(?:агентн[а-я]+|мультимодальн[а-я]+|объясним[а-я]+|медицинск[а-я]+) ии|обработк[а-я]* естественн[а-я]+ язык[а-я]*|компьютерн[а-я]+ зрени[а-я]*|видеоаналитик[а-я]*|(?:распознаван[а-я]*|синтез[а-я]*) речи|рекомендательн[а-я]+ систем[а-я]*|поисков[а-я]+ технолог[а-я]*|обучен[а-я]* с подкреплени[а-я]*|промпт[ -]инжиниринг[а-я]*|(?:обучен[а-я]*|оценк[а-я]*|дообучен[а-я]*) модел[а-я]*|(?:этик[а-я]*|регулирован[а-я]*|безопасност[а-я]*) ии)"#,
+        #"(?:machine learning|deep learning|artificial intelligence|generative ai|edge ai|agentic ai|nlp|computer vision|reinforcement learning|prompt engineer[a-z]*|ai[ -](?:консалтинг|продукт[а-я]*)|ии[ -]продукт[а-я]*)"#,
+        #"(?:интернет[ -]вещей|iot|iiot|робототехник[а-я]*|(?:беспилотн[а-я]+|автономн[а-я]+|геоинформационн[а-я]+|распределенн[а-я]+) систем[а-я]*|биоинформатик[а-я]*|финтех[а-я]*|fintech|(?:высокопроизводительн[а-я]+|научн[а-я]+|квантов[а-я]+) вычислен[а-я]*|блокчейн[а-я]*|blockchain|цифров[а-я]+ двойник[а-я]*|промышленн[а-я]+ автоматизац[а-я]*|умн[а-я]+ (?:производств[а-я]*|город[а-я]*)|hr[ -]?tech|edtech|legaltech|govtech)"#
+    ])
+}
+
+/// The more specific security field takes visual precedence over general technology.
+/// This is derived from vacancy content, so existing offline favorites need no migration.
+enum VacancyField {
+    case general, technology, informationSecurity
+}
+
+/// Explicit security disciplines match anywhere; ambiguous adjacent skills only in
+/// job titles/roles. Generic compliance instructions do not turn every employee into IB.
+enum VacancyInformationSecurityClassifier {
+    static func matches(title: String, roles: [String] = [], context: String = "") -> Bool {
+        if ([title] + roles).contains(where: {
+            contains(securityPattern, in: normalize($0)) || contains(adjacentRolePattern, in: normalize($0))
+        }) { return true }
+        return context.components(separatedBy: CharacterSet(charactersIn: ".;!\n")).contains { fragment in
+            let text = normalize(fragment)
+            guard contains(securityPattern, in: text) else { return false }
+            return !contains(boilerplatePattern, in: text) || contains(securityWorkPattern, in: text)
+        }
+    }
+
+    private static func normalize(_ text: String) -> String {
+        text.lowercased().replacingOccurrences(of: "ё", with: "е")
+            .replacingOccurrences(of: "[‐‑–—−]", with: "-", options: .regularExpression)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+    }
+
+    private static func contains(_ pattern: NSRegularExpression, in text: String) -> Bool {
+        pattern.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil
+    }
+
+    private static func expression(_ alternatives: [String]) -> NSRegularExpression {
+        try! NSRegularExpression(pattern: #"(?<![\p{L}\p{N}])(?:"# + alternatives.joined(separator: "|") + #")(?![\p{L}\p{N}])"#)
+    }
+
+    private static let securityPattern = expression([
+        // Core disciplines, Russian and English job names, unambiguous abbreviations.
+        #"(?:информационн[а-я]+|компьютерн[а-я]+|облачн[а-я]+|сетев[а-я]+|криптографическ[а-я]+) безопасност[а-я]*"#,
+        #"кибер[ -]?(?:безопасност[а-я]*|защит[а-я]*|устойчивост[а-я]*)|киберугроз[а-я]*|госсопка"#,
+        #"(?:information|cyber|computer|network|cloud|application|data|software|product|infrastructure|ai|it)[ -]?security|infosec|devsecops|appsec|secops|security (?:engineer|architect|analyst|researcher|officer)|ciso"#,
+        #"иб|сзи|скзи|тзи|soc|siem|soar|ndr|edr|xdr|waf|dlp|dcap|iam|pam|ids|ips|ddos|испдн"#,
+        #"защит[а-я]* (?:информац[а-я]*|(?:персональн[а-я]+|конфиденциальн[а-я]+) данных|данных|(?:коммерческ[а-я]+|государственн[а-я]+) тайн[а-я]*)"#,
+        #"инженерно[ -]техническ[а-я]+ защит[а-я]*|информационно[ -]аналитическ[а-я]+ систем[а-я]* безопасност[а-я]*"#,
+        #"(?:систем[а-я]*|средств[а-я]*) (?:криптографическ[а-я]+ )?защит[а-я]* информац[а-я]*"#,
+        #"безопасност[а-я]* (?:информационн[а-я]+ технолог[а-я]*|компьютерн[а-я]+ систем[а-я]*|приложени[а-я]*|кода|api|(?:веб|web)[ -]приложени[а-я]*|мобильн[а-я]+ приложени[а-я]*|контейнер[а-я]*|ci/cd|периметр[а-я]*|беспроводн[а-я]+ сет[а-я]*|электронн[а-я]+ почт[а-я]*|данных|баз[а-я]* данных)"#,
+        #"безопасн[а-я]+ (?:разработк[а-я]*|sdlc)|secure (?:sdlc|coding|development)|(?:sast|dast|sca)"#,
+        // Offensive security, vulnerability research and defensive operations.
+        #"(?:оценк[а-я]*|анализ[а-я]*) защищенност[а-я]*|(?:анализ[а-я]*|моделирован[а-я]*) угроз[а-я]*|(?:анализ[а-я]*|управлен[а-я]*|исследован[а-я]*) уязвимост[а-я]*"#,
+        #"(?:тестирован[а-я]* на проникновен[а-я]*|пентест[а-я]*|penetration test[a-z]*|pentest[a-z]*|этичн[а-я]+ хакинг[а-я]*|ethical hack[a-z]*|(?:red|blue|purple)[ -]team[a-z]*|bug[ -]bounty|threat[ -]hunting|threat intelligence)"#,
+        #"защит[а-я]* (?:веб[ -]приложени[а-я]*|конечн[а-я]+ точ[а-я]*|от (?:ddos|вредоносн[а-я]+ код[а-я]*))|антифишинг[а-я]*|антивирусн[а-я]+ защит[а-я]*"#,
+        #"межсетев[а-я]+ экранирован[а-я]*|(?:обнаружен[а-я]*|предотвращен[а-я]*) вторжени[а-я]*|(?:обнаружен[а-я]*|предупрежден[а-я]*) компьютерн[а-я]+ атак[а-я]*"#,
+        #"вредоносн[а-я]+ (?:программн[а-я]+ обеспечен[а-я]*|код[а-я]*)|malware|ransomware|фишинг[а-я]*"#,
+        #"центр[а-я]* мониторинг[а-я]* и реагирован[а-я]*|цифров[а-я]+ криминалистик[а-я]*|компьютерно[ -]техническ[а-я]+ экспертиз[а-я]*|форензик[а-я]*|(?:digital |computer )?forensics"#,
+        // Identity, data protection, cryptography, regulated environments.
+        #"управлен[а-я]* (?:идентификаци[а-я]* и доступ[а-я]*|привилегированн[а-я]+ доступ[а-я]*|секрет[а-я]*)|многофакторн[а-я]+ аутентификаци[а-я]*|zero[ -]trust"#,
+        #"конфиденциальност[а-я]* данных|предотвращен[а-я]* утеч[а-я]* данных|контрол[а-я]* доступ[а-я]* к баз[а-я]* данных|маскирован[а-я]* данных"#,
+        #"криптограф[а-я]*|инфраструктур[а-я]* открыт[а-я]+ ключ[а-я]*|удостоверяющ[а-я]+ центр[а-я]*|стеганограф[а-я]*|pki|hsm"#,
+        #"режим[а-я]* секретност[а-я]*|противодействи[а-я]* техническ[а-я]+ разведк[а-я]*|защит[а-я]* от утеч[а-я]* по техническ[а-я]+ канал[а-я]*"#,
+        #"безопасност[а-я]* (?:критическ[а-я]+ информационн[а-я]+ инфраструктур[а-я]*|объект[а-я]* кии|государственн[а-я]+ информационн[а-я]+ систем[а-я]*|асу тп)|аттестаци[а-я]* объект[а-я]* информатизаци[а-я]*"#,
+        #"фстэк|(?:требован[а-я]*|лицензи[а-я]*) фсб|(?:гост[ -]р[ -])?(?:исо/мэк[ -])27001|(?:гост[ -]р[ -])57580(?:[.][0-9]+)?|iso[ /-]*(?:iec[ /-]*)?27001|pci[ -]dss"#,
+        #"антифрод[а-я]*|anti[ -]?fraud|безопасност[а-я]* платеж[а-я]*"#,
+        #"безопасност[а-я]* (?:искусственн[а-я]+ интеллект[а-я]*|модел[а-я]* машинн[а-я]+ обучени[а-я]*|ии|интернет[а-я]* вещей|виртуализаци[а-я]*|беспилотн[а-я]+ и автономн[а-я]+ систем[а-я]*|цепоч[а-я]* поставок программн[а-я]+ обеспечени[а-я]*)|защит[а-я]* от атак на ии"#,
+        #"управлен[а-я]* конфигураци[а-я]* безопасност[а-я]*"#
+    ])
+
+    // These fields were requested too, but are also ordinary IT/legal/business duties.
+    // A dedicated job/role name is stronger evidence than a passing mention in a description.
+    private static let adjacentRolePattern = expression([
+        #"анализ[а-я]* (?:исходн[а-я]+ код[а-я]*|состав[а-я]* программн[а-я]+ обеспечени[а-я]*|сетев[а-я]+ трафик[а-я]*)"#,
+        #"динамическ[а-я]+ тестирован[а-я]* приложени[а-я]*|сегментаци[а-я]* сет[а-я]*|песочниц[а-я]*"#,
+        #"(?:реагирован[а-я]*|расследован[а-я]*) (?:на )?инцидент[а-я]*|incident response"#,
+        #"аутентификаци[а-я]* и авторизаци[а-я]*|классификаци[а-я]* данных|электронн[а-я]+ подпис[а-я]*|управлен[а-я]* ключ[а-я]*"#,
+        #"непрерывност[а-я]* деятельност[а-я]*|аварийн[а-я]+ восстановлен[а-я]*|резервн[а-я]+ копирован[а-я]*|disaster recovery|business continuity"#,
+        #"соответстви[а-я]* требован[а-я]* банк[а-я]* россии|взаимодействи[а-я]* с регулятор[а-я]*"#
+    ])
+
+    private static let boilerplatePattern = expression([
+        #"(?:соблюд[а-я]*|выполн[а-я]*|следова[а-я]*) (?:[а-я]+ ){0,4}(?:требован[а-я]*|правил[а-я]*|политик[а-я]*|регламент[а-я]*|норм[а-я]*)"#,
+        #"знани[а-я]* основ|согласи[а-я]* на обработк[а-я]*|ознакомлен[а-я]* с политик[а-я]*"#
+    ])
+
+    private static let securityWorkPattern = expression([
+        #"(?:разработк[а-я]*|внедрен[а-я]*|проектирован[а-я]*|администрирован[а-я]*|аудит[а-я]*|мониторинг[а-я]*|расследован[а-я]*|моделирован[а-я]*|тестирован[а-я]*|управлен[а-я]*|контрол[а-я]*|обеспечени[а-я]*) (?:[а-я]+ ){0,3}(?:иб|информационн[а-я]+ безопасност[а-я]*|сзи|скзи|siem|soc|dlp|waf|уязвимост[а-я]*|угроз[а-я]*|защит[а-я]*)"#
+    ])
 }

@@ -82,11 +82,24 @@ struct HHAPIClient: HHVacancyAPIClient, Sendable {
     private let session: URLSession
     private let accessTokenProvider: HHAccessTokenProviding
     private let requestGate: HHRequestGate
+    private let maximumRateLimitRetries: Int
+    private let retrySleep: @Sendable (UInt64) async throws -> Void
+    private let retryNow: @Sendable () -> Date
 
-    init(session: URLSession = .shared, accessTokenProvider: HHAccessTokenProviding = HHDefaultAccessTokenProvider(), requestGate: HHRequestGate = .shared) {
+    init(
+        session: URLSession = .shared,
+        accessTokenProvider: HHAccessTokenProviding = HHDefaultAccessTokenProvider(),
+        requestGate: HHRequestGate = .shared,
+        maximumRateLimitRetries: Int = 2,
+        retrySleep: @escaping @Sendable (UInt64) async throws -> Void = { try await Task.sleep(nanoseconds: $0) },
+        retryNow: @escaping @Sendable () -> Date = Date.init
+    ) {
         self.session = session
         self.accessTokenProvider = accessTokenProvider
         self.requestGate = requestGate
+        self.maximumRateLimitRetries = min(2, max(0, maximumRateLimitRetries))
+        self.retrySleep = retrySleep
+        self.retryNow = retryNow
     }
 
     func searchVacancies(_ search: HHVacancySearchRequest) async throws -> HHVacancySearchResponse {
@@ -156,26 +169,59 @@ struct HHAPIClient: HHVacancyAPIClient, Sendable {
         return request
     }
 
+    // A server delay above the automatic-wait ceiling stops the operation;
+    // clamping it and retrying early would disregard Retry-After.
+    static func rateLimitDelay(header: String?, now: Date, attempt: Int) -> TimeInterval? {
+        let backoff = attempt == 0 ? 1.0 : 2.0
+        guard let header else { return backoff }
+        let value = header.trimmingCharacters(in: .whitespacesAndNewlines)
+        let seconds: TimeInterval?
+        if !value.isEmpty, value.allSatisfy({ $0.isASCII && $0.isNumber }) {
+            seconds = Double(value)
+        } else {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = TimeZone(secondsFromGMT: 0)
+            formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+            formatter.isLenient = false
+            seconds = formatter.date(from: value).map { max(0, $0.timeIntervalSince(now)) }
+        }
+        guard let seconds else { return backoff }
+        guard seconds.isFinite, seconds <= 60 else { return nil }
+        return max(backoff, seconds)
+    }
+
     private func data(for request: URLRequest) async throws -> Data {
         try await requestGate.perform {
-            let data: Data
-            let response: URLResponse
-            do { (data, response) = try await session.data(for: request) }
-            catch let error as URLError where error.code == .cancelled { throw CancellationError() }
-            guard let http = response as? HTTPURLResponse else { throw HHAPIError.invalidResponse }
-            guard (200...299).contains(http.statusCode) else {
+            var retryCount = 0
+            while true {
+                try Task.checkCancellation()
+                let data: Data
+                let response: URLResponse
+                do { (data, response) = try await session.data(for: request) }
+                catch let error as URLError where error.code == .cancelled { throw CancellationError() }
+                guard let http = response as? HTTPURLResponse else { throw HHAPIError.invalidResponse }
+                if (200...299).contains(http.statusCode) { return data }
                 let body = try? JSONDecoder().decode(HHErrorResponse.self, from: data)
                 if body?.isCaptchaRequired == true { throw HHAPIError.captchaRequired(requestID: body?.requestID) }
                 switch http.statusCode {
                 case 401: throw HHAPIError.unauthorized
                 case 403: throw HHAPIError.forbidden(requestID: body?.requestID)
-                case 429: throw HHAPIError.rateLimited(retryAfterSeconds: http.value(forHTTPHeaderField: "Retry-After").flatMap(Int.init))
+                case 429:
+                    let header = http.value(forHTTPHeaderField: "Retry-After")
+                    guard retryCount < maximumRateLimitRetries,
+                          let delay = Self.rateLimitDelay(header: header, now: retryNow(), attempt: retryCount) else {
+                        throw HHAPIError.rateLimited(retryAfterSeconds: header.flatMap(Int.init))
+                    }
+                    retryCount += 1
+                    // Keep the shared gate while waiting: queued work cannot overtake a retry.
+                    try await retrySleep(UInt64(delay * 1_000_000_000))
                 default: throw HHAPIError.requestFailed(statusCode: http.statusCode, message: body?.description)
                 }
             }
-            return data
         }
     }
+
 }
 
 actor HHRequestGate {

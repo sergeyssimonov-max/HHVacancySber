@@ -120,9 +120,15 @@ enum PDFFileNameBuilder {
 
     private static func prefixFittingUTF8Budget(_ value: String, budget: Int) -> String {
         var result = ""
+        var usedBytes = 0
         for character in value {
-            guard result.utf8.count + String(character).utf8.count <= budget else { break }
+            let text = String(character)
+            // File URLs may expose decomposed Unicode on macOS. Reserve enough
+            // bytes for either representation, including accented Cyrillic.
+            let cost = max(text.utf8.count, text.decomposedStringWithCanonicalMapping.utf8.count)
+            guard usedBytes + cost <= budget else { break }
             result.append(character)
+            usedBytes += cost
         }
         return result.trimmingCharacters(in: CharacterSet(charactersIn: "_"))
     }
@@ -535,7 +541,7 @@ struct VacancyStatisticsReport: Sendable {
         for (index, row) in ordered.enumerated() {
             try Task.checkCancellation()
             let date = row.date.map { formatter.string(from: $0) } ?? "Дата размещения не указана"
-            builder.field("\(index + 1). \(row.entry.name)", date)
+            builder.vacancyListItem(index: index + 1, name: row.entry.name, publishedAt: date)
         }
         return builder.document
     }
@@ -628,6 +634,14 @@ private final class VacancyPDFDocumentBuilder {
             .font: Self.bodyFont,
             .foregroundColor: NSColor.black,
             .paragraphStyle: paragraphStyle(lineSpacing: 2.2, paragraphSpacing: 7)
+        ])
+    }
+
+    func vacancyListItem(index: Int, name: String, publishedAt: String) {
+        append("\(index). \(name): \(publishedAt)\n", attributes: [
+            .font: Self.bodyFont,
+            .foregroundColor: NSColor.black,
+            .paragraphStyle: paragraphStyle(lineSpacing: 3, paragraphSpacing: 5)
         ])
     }
 
@@ -1747,6 +1761,32 @@ actor PDFExportWorker {
         })
     }
 
+    func availableCollisionPlan(
+        names: [String], directory: URL, maximumCandidates: Int = 10_000
+    ) throws -> PDFCollisionPlan {
+        var reserved = Set<String>()
+        var authorizations: [PDFDestinationAuthorization] = []
+        for name in names {
+            var selected: PDFDestinationAuthorization?
+            for number in 1...max(1, maximumCandidates) {
+                try Task.checkCancellation()
+                let candidate = number == 1 ? name : PDFFileNameBuilder.fileName(
+                    base: name, semanticSuffix: String(number), fallback: "vacancy"
+                )
+                guard reserved.insert(candidate).inserted else { continue }
+                let destination = directory.appendingPathComponent(candidate)
+                guard !fileSystem.fileExists(atPath: destination.path) else { continue }
+                // Publication still checks the captured absent state. A file appearing
+                // after this selection aborts the transaction instead of being replaced.
+                selected = PDFDestinationAuthorization(destination: destination, expectedState: .absent)
+                break
+            }
+            guard let selected else { throw FavoriteVacanciesPDFExporter.ExportError.noAvailableFileName }
+            authorizations.append(selected)
+        }
+        return PDFCollisionPlan(authorizations: authorizations)
+    }
+
     func exportPersonal(
         vacancy: PDFVacancySnapshot,
         destination: URL,
@@ -1839,12 +1879,14 @@ final class FavoriteVacanciesPDFExporter: FavoriteVacanciesPDFExporting {
         case cannotCreatePDF
         case invalidPDF(String)
         case missingPreparedExport
+        case noAvailableFileName
 
         var errorDescription: String? {
             switch self {
             case .cannotCreatePDF: return "Не удалось сформировать PDF-документ."
             case .invalidPDF(let name): return "Не удалось проверить PDF «\(name)»."
             case .missingPreparedExport: return "Не удалось подготовить PDF-документ."
+            case .noAvailableFileName: return "Не удалось подобрать свободное имя PDF. Выберите другой каталог."
             }
         }
     }
@@ -1894,15 +1936,9 @@ final class FavoriteVacanciesPDFExporter: FavoriteVacanciesPDFExporting {
             let names = (0..<prepared.partCount).map {
                 Self.fileName(part: $0 + 1, totalParts: prepared.partCount, exportStartedAt: exportStartedAt)
             }
-            let collisionPlan = try await worker.collisionPlan(names: names, directory: directory)
-            guard collisionPlan.collidingNames.isEmpty
-                    || confirmReplacement(collisionPlan.collidingNames) else {
-                await worker.discardPreparedExport()
-                return .cancelled
-            }
-
+            let collisionPlan = try await worker.availableCollisionPlan(names: names, directory: directory)
             let publication = try await worker.publish(
-                names: names,
+                names: collisionPlan.authorizations.map { $0.destination.lastPathComponent },
                 directory: directory,
                 authorizations: collisionPlan.authorizations
             )
