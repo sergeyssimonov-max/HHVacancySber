@@ -92,7 +92,7 @@ struct HHAPIClient: HHVacancyAPIClient, Sendable {
         requestGate: HHRequestGate = .shared,
         maximumRateLimitRetries: Int = 2,
         retrySleep: @escaping @Sendable (UInt64) async throws -> Void = { try await Task.sleep(nanoseconds: $0) },
-        retryNow: @escaping @Sendable () -> Date = Date.init
+        retryNow: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.session = session
         self.accessTokenProvider = accessTokenProvider
