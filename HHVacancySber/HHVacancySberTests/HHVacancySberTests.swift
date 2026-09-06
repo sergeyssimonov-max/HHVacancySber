@@ -1904,8 +1904,16 @@ final class HHVacancySberTests: XCTestCase {
             let pdf = try XCTUnwrap(PDFDocument(url: file))
             XCTAssertEqual(pdf.pageCount, 1)
             let text = try extractedStatisticsText(pdf)
-            XCTAssertEqual(text.components(separatedBy: "UNIQUE_TITLE_ALPHA").count - 1, 1, "Extracted synthetic PDF text: \(text)")
-            XCTAssertEqual(text.components(separatedBy: "UNIQUE_SNIPPET_BETA").count - 1, 1, "Extracted synthetic PDF text: \(text)")
+            // PDFKit on macOS 15 inserts extraction-only line breaks around
+            // underscores. Preserve exact source markers and require every glyph
+            // exactly once in the PDF, independent of extracted whitespace.
+            let sourceText = VacancyPDFFormatter.attributedDocument(for: value).string
+            let markerText = text.components(separatedBy: .whitespacesAndNewlines).joined()
+            for marker in ["UNIQUE_TITLE_ALPHA", "UNIQUE_SNIPPET_BETA"] {
+                XCTAssertEqual(sourceText.components(separatedBy: marker).count - 1, 1)
+                XCTAssertEqual(markerText.components(separatedBy: marker).count - 1, 1,
+                               "Extracted synthetic PDF text: \(text)")
+            }
             XCTAssertTrue(text.contains("DepartmentFallback"), "Lost summary department")
             XCTAssertTrue(text.contains("2026-09-02T12:34:56+0300"), "Lost summary publication date")
             XCTAssertTrue(text.contains("123 456"), "Lost summary salary")
