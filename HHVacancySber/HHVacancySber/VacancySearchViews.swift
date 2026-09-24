@@ -59,19 +59,32 @@ enum VacancySearchViews {
                     .accessibilityHidden(viewModel.updatedAtMessage == nil)
                     .accessibilityIdentifier("vacancyUpdateStatus")
 
-                Button(action: refresh) {
-                    Text(viewModel.isLoading ? "Обновление…" : "Обновить выборку")
+                Button {
+                    if viewModel.isLoading { viewModel.cancelSearch() } else { refresh() }
+                } label: {
+                    Text(refreshButtonTitle)
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
                 .frame(width: ToolbarMetrics.refreshWidth, height: ToolbarMetrics.controlHeight)
-                .disabled(!viewModel.canSearch)
+                .disabled(viewModel.isLoading ? !viewModel.canCancelSearch : !viewModel.canSearch)
+                .help(viewModel.isLoading ? "Остановить загрузку; сохранится предыдущая полная выборка" : "")
                 .accessibilityIdentifier("searchVacanciesButton")
             }
             .controlSize(.large)
             .padding(.horizontal, 20)
             .padding(.vertical, 10)
             .background(DeskPalette.toolbar)
+        }
+
+        private var refreshButtonTitle: String {
+            guard viewModel.isLoading else { return "Обновить выборку" }
+            return viewModel.isCancellingSearch ? "Отмена…" : "Отменить загрузку"
+        }
+
+        private var favoritesExportTitle: String {
+            guard viewModel.isExportingFavoritesPDF else { return "Экспортировать всё в PDF" }
+            return viewModel.isCancellingFavoritesPDFExport ? "Отмена…" : "Отменить экспорт"
         }
 
         @ViewBuilder private var content: some View {
@@ -100,9 +113,15 @@ enum VacancySearchViews {
                     if let progress = viewModel.favoritesPDFExportProgress {
                         ProgressView(value: Double(progress.completedVacancies), total: Double(max(1, progress.totalVacancies))).frame(width: 90)
                     }
-                    PDFExportCommand(title: viewModel.isExportingFavoritesPDF ? "Экспорт…" : "Экспортировать всё в PDF") {
-                        Task { await viewModel.exportFavoriteVacanciesPDF() }
-                    }.disabled(!viewModel.canExportFavoritesPDF)
+                    PDFExportCommand(title: favoritesExportTitle) {
+                        if viewModel.isExportingFavoritesPDF {
+                            viewModel.cancelFavoritesPDFExport()
+                        } else {
+                            viewModel.startFavoritesPDFExport()
+                        }
+                    }.disabled(viewModel.isExportingFavoritesPDF
+                        ? !viewModel.canCancelFavoritesPDFExport
+                        : !viewModel.canExportFavoritesPDF)
                         .accessibilityIdentifier("exportFavoritesPDFButton")
                 }
                 PDFExportCommand(title: viewModel.isExportingStatisticsPDF ? "Сохранение…" : "Статистика в PDF") {

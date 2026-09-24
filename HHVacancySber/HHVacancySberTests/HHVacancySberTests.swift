@@ -1532,7 +1532,7 @@ final class HHVacancySberTests: XCTestCase {
     }
 
     @MainActor
-    func testArchiveCheckMarksNotFoundAsCheckedAndContinues() async {
+    func testArchiveCheckMarksNotFoundAsArchivedAndContinues() async {
         func record(id: String) -> FavoriteVacancyRecord {
             let vacancy = summary(id: id, areaID: "1", areaName: "Москва")
             let result = VacancySearchResult(
@@ -1575,8 +1575,92 @@ final class HHVacancySberTests: XCTestCase {
 
         let saved = store.lastSaved
         XCTAssertEqual(saved.first { $0.id == "3529-missing" }?.archiveCheckedAt, now)
-        XCTAssertEqual(saved.first { $0.id == "3529-missing" }?.isArchived, false)
+        XCTAssertEqual(saved.first { $0.id == "3529-missing" }?.isArchived, true)
         XCTAssertEqual(saved.first { $0.id == "3529-continues" }?.isArchived, true)
+    }
+
+    @MainActor
+    private func makeOfflineFavoriteModel(mode: MockAPIClient.Mode, store: SlowRecordingFavoriteStore) -> VacancySearchViewModel {
+        VacancySearchViewModel(
+            apiClient: MockAPIClient(mode: mode),
+            employerStore: TestEmployerStore(entries: [.init(id: "3529", name: "СБЕР", comment: "test")]),
+            areaStore: AreaDirectoryStore(fileURL: temporaryDirectory().appendingPathComponent("areas.json")),
+            favoritesStore: store
+        )
+    }
+
+    private func offlineFavoriteRecord(id: String) -> FavoriteVacancyRecord {
+        let vacancy = summary(id: id, areaID: "1", areaName: "Москва")
+        let result = VacancySearchResult(
+            id: vacancy.id,
+            summary: vacancy,
+            details: .init(
+                id: vacancy.id, name: vacancy.name, employer: vacancy.employer, area: vacancy.area,
+                salary: nil, alternateURL: vacancy.alternateURL, description: nil, archived: false
+            ),
+            location: .subject(id: "1", name: "Москва", cityID: "1", cityName: "Москва")
+        )
+        return FavoriteVacancyRecord(result: result, favoritedAt: .distantPast, updatedAt: .distantPast)
+    }
+
+    @MainActor
+    func testOfflineFavoriteDetailsLoadAndPersistSnapshotWithoutSearch() async {
+        let store = SlowRecordingFavoriteStore(favorites: [offlineFavoriteRecord(id: "3529-offline")])
+        let model = makeOfflineFavoriteModel(mode: .simple, store: store)
+        await model.loadPersistenceIfNeeded()
+        model.displayMode = .favorites
+        XCTAssertFalse(model.displayedResults[0].isDetailLoaded)
+
+        await model.loadVacancyDetails(id: "3529-offline")
+        await model.waitForPendingFavoritesSaves()
+
+        XCTAssertTrue(model.results.isEmpty)
+        XCTAssertTrue(model.displayedResults[0].isDetailLoaded)
+        XCTAssertEqual(model.displayedResults[0].plainTextDescription, "Полное описание")
+        XCTAssertEqual(store.lastSaved.first?.detailsSnapshot?.description, "<p>Полное описание</p>")
+    }
+
+    @MainActor
+    func testOfflineFavoriteDetailFailureIsShownOnTheCard() async {
+        let store = SlowRecordingFavoriteStore(favorites: [offlineFavoriteRecord(id: "3529-offline")])
+        let model = makeOfflineFavoriteModel(mode: .failure, store: store)
+        await model.loadPersistenceIfNeeded()
+        model.displayMode = .favorites
+
+        await model.loadVacancyDetails(id: "3529-offline")
+
+        let card = model.displayedResults[0]
+        XCTAssertFalse(card.isDetailLoaded)
+        XCTAssertFalse(card.isDetailLoading)
+        XCTAssertTrue(card.detailErrorMessage?.hasPrefix("Не удалось загрузить описание") == true)
+        XCTAssertNil(store.lastSaved.first?.detailsSnapshot)
+    }
+
+    @MainActor
+    func testStartedRefreshCanBeCancelledAndKeepsPreviousResults() async {
+        let client = MockAPIClient(mode: .delayedRefreshFailure)
+        let model = VacancySearchViewModel(
+            apiClient: client,
+            employerStore: TestEmployerStore(entries: [.init(id: "3529", name: "СБЕР", comment: "test")]),
+            areaStore: AreaDirectoryStore(fileURL: temporaryDirectory().appendingPathComponent("areas.json"))
+        )
+        await model.search()
+        let initialRequestCount = await client.searchRequestCount
+        await client.enableDelayedSearchFailure()
+
+        model.startRefresh()
+        XCTAssertFalse(model.canSearch)
+        while await client.searchRequestCount == initialRequestCount { await Task.yield() }
+        XCTAssertTrue(model.canCancelSearch)
+        model.cancelSearch()
+        XCTAssertTrue(model.isCancellingSearch)
+        XCTAssertFalse(model.canCancelSearch)
+        while !model.canSearch { await Task.yield() }
+
+        XCTAssertEqual(model.statusMessage, "Поиск отменён.")
+        XCTAssertNil(model.errorMessage)
+        XCTAssertFalse(model.isCancellingSearch)
+        XCTAssertEqual(model.results.map(\.id), ["3529-vacancy"])
     }
 
     @MainActor
