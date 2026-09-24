@@ -50,6 +50,8 @@ Bundled-файл находится в `HHVacancySber/HHVacancySber/employers.js
 
 Канонический вектор новой зелёной пиктограммы — `HHVacancySber/Design/AppIcon.svg`. Скрипт `HHVacancySber/Scripts/render_icon.py` создаёт слоты 16–1024 через CairoSVG, `rsvg-convert`, macOS AppKit или Pillow и явно завершается ошибкой, если SVG-backend недоступен.
 
-DMG собирается из чистого commit командой `scripts/release.sh --output-dir <directory>`. Скрипт проверяет Release-настройки, sandbox entitlements и итоговый образ.
+DMG собирается из чистого commit командой `scripts/release.sh --output-dir <directory>`. Скрипт собирает Release с теми же строгими флагами, что и CI, проверяет подпись, hardened runtime и sandbox entitlements (`scripts/verify_release_entitlements.py`), кладет в образ приложение, ссылку на «Программы» и `README.txt` с исходным commit, пишет рядом `.sha256` и удаляет рабочий каталог. Существующий DMG с тем же именем не перезаписывается.
+
+По умолчанию подпись ad hoc: на другом Mac Gatekeeper покажет предупреждение. Для распространения задайте `DEVELOPER_ID="Developer ID Application: … (TEAMID)"`, а для нотаризации еще `NOTARY_PROFILE` – имя профиля, сохраненного через `xcrun notarytool store-credentials`.
 
 При повторном экспорте избранного в тот же каталог занятые имена сохраняются: новый PDF получает суффикс `_2`, `_3` и далее. Каждый файл создаётся только под свободным именем (`O_CREAT | O_EXCL`), поэтому существующий файл не заменяется, даже если появился в последний момент. В каталоге остаются только PDF: при ошибке или отмене уже записанные в этом экспорте файлы удаляются, служебных каталогов нет. Явный выбор файла через системные панели личного и статистического PDF сохраняет прежний сценарий подтверждения замены.
