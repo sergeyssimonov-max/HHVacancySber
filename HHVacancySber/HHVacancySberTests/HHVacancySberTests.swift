@@ -2033,6 +2033,32 @@ final class HHVacancySberTests: XCTestCase {
         try FavoriteVacanciesPDFExporter.validatePDF(data: data, expectedPages: pages.count)
     }
 
+    @MainActor
+    func testPDFSnapshotImportsHTMLOnMainActorForBackgroundRendering() async throws {
+        let snapshot = PDFVacancySnapshot(value: makePDFVacancy(id: "main-import"))
+        let imported = try XCTUnwrap(snapshot.importedDescription)
+        XCTAssertTrue(imported.string.contains("Кириллица, Unicode"))
+
+        // Rendering happens off the main actor from the imported text only.
+        let rendered = await Task.detached { snapshot.attributedDocument.string }.value
+        XCTAssertTrue(rendered.contains("Кириллица, Unicode"))
+        XCTAssertFalse(rendered.contains("<p>"))
+
+        let batch = try await PDFVacanciesSnapshot.make(values: [makePDFVacancy(id: "a"), makePDFVacancy(id: "b")])
+        XCTAssertEqual(batch.values.map(\.value.id), ["a", "b"])
+        XCTAssertTrue(batch.values.allSatisfy { $0.importedDescription != nil })
+    }
+
+    func testPDFDocumentWithoutImportedDescriptionFallsBackToPlainText() {
+        let document = VacancyPDFFormatter.attributedDocument(
+            for: makePDFVacancy(id: "plain"),
+            importedDescription: nil
+        ).string
+        XCTAssertTrue(document.contains("Кириллица, Unicode"))
+        XCTAssertFalse(document.contains("<p>"))
+    }
+
+    @MainActor
     func testPDFHeadingAndBodyTypographyUsesReducedPointSizes() throws {
         let document = VacancyPDFFormatter.attributedDocument(for: makePDFVacancy(id: "typography"))
         let text = document.string as NSString
@@ -2059,6 +2085,7 @@ final class HHVacancySberTests: XCTestCase {
         )
     }
 
+    @MainActor
     func testPersonalPDFWorkerCreatesAtomicValidDocument() async throws {
         let directory = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -2160,6 +2187,7 @@ final class HHVacancySberTests: XCTestCase {
         }
     }
 
+    @MainActor
     func testPDFFallbackDoesNotOverrideAvailableDetailFields() throws {
         let summary = HHVacancySummary(id: "priority", name: "Priority title", employer: nil,
             salary: .init(from: 123_456, to: nil, currency: "RUR", gross: nil), area: nil,
@@ -2181,6 +2209,7 @@ final class HHVacancySberTests: XCTestCase {
         }
     }
 
+    @MainActor
     func testPDFPublicationFailureAndCancellationRestoreOriginalsAndRetainRecovery() async throws {
         for cancel in [false, true] {
             let directory = temporaryDirectory()
@@ -2220,6 +2249,7 @@ final class HHVacancySberTests: XCTestCase {
         }
     }
 
+    @MainActor
     func testPDFStagedValidationFailureLeavesOriginalUntouched() async throws {
         let directory = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -2242,6 +2272,7 @@ final class HHVacancySberTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: destination), original)
     }
 
+    @MainActor
     func testPDFCollisionRetainsBackupForNonDestructiveManualRecovery() async throws {
         let directory = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

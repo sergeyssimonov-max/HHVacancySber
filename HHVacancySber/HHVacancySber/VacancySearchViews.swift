@@ -344,11 +344,14 @@ struct VacancyHTMLDescriptionView: NSViewRepresentable {
         context.coordinator.field = field
         view.loadHTMLString(VacancyHTMLDocument.make(from: html, field: field), baseURL: nil)
     }
+    // The async form matches WKNavigationDelegate on every SDK. The completion-handler
+    // form only nearly matched the Xcode 16 signature and was then never called.
+    @MainActor
     final class Coordinator: NSObject, WKNavigationDelegate {
         var loaded: String?
         var field: VacancyField?
-        func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-            decisionHandler(action.request.url?.scheme == "about" ? .allow : .cancel)
+        func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction) async -> WKNavigationActionPolicy {
+            action.request.url?.scheme == "about" ? .allow : .cancel
         }
     }
 }

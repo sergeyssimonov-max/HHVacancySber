@@ -200,7 +200,26 @@ enum PDFVisualContentValidator {
 }
 
 enum VacancyPDFFormatter {
+    /// Imports the description on the calling (main) actor and builds the document.
+    @MainActor
     static func attributedDocument(for vacancy: VacancySearchResult) -> NSAttributedString {
+        attributedDocument(for: vacancy, importedDescription: importedDescription(for: vacancy))
+    }
+
+    /// AppKit imports HTML through WebKit, which is main-thread only. Import here and pass
+    /// the result to background rendering instead of importing inside PDFExportWorker.
+    @MainActor
+    static func importedDescription(for vacancy: VacancySearchResult) -> NSAttributedString? {
+        guard let html = descriptionHTML(for: vacancy) else { return nil }
+        return VacancyHTMLAttributedText.convert(html)
+    }
+
+    /// Safe off the main actor: HTML is never imported here. A description that was not
+    /// imported in advance falls back to plain text.
+    static func attributedDocument(
+        for vacancy: VacancySearchResult,
+        importedDescription: NSAttributedString?
+    ) -> NSAttributedString {
         let builder = VacancyPDFDocumentBuilder()
         let details = vacancy.details
 
@@ -233,7 +252,7 @@ enum VacancyPDFFormatter {
 
         appendSalary(details: details, fallbackText: vacancy.salaryText, to: builder)
         appendEmployment(details, to: builder)
-        appendDescription(vacancy, to: builder)
+        appendDescription(vacancy, importedDescription: importedDescription, to: builder)
 
         let skills = names(details.keySkills)
         if !skills.isEmpty {
@@ -335,11 +354,18 @@ enum VacancyPDFFormatter {
         builder.field("Ночные смены", yesNo(details.nightShifts))
     }
 
-    private static func appendDescription(_ vacancy: VacancySearchResult, to builder: VacancyPDFDocumentBuilder) {
+    private static func descriptionHTML(for vacancy: VacancySearchResult) -> String? {
+        vacancy.details.description?.nilIfBlank ?? vacancy.details.brandedDescription?.nilIfBlank
+    }
+
+    private static func appendDescription(
+        _ vacancy: VacancySearchResult,
+        importedDescription: NSAttributedString?,
+        to builder: VacancyPDFDocumentBuilder
+    ) {
         builder.section("Описание вакансии")
-        if let html = vacancy.details.description?.nilIfBlank
-            ?? vacancy.details.brandedDescription?.nilIfBlank {
-            builder.html(html)
+        if let html = descriptionHTML(for: vacancy) {
+            builder.html(importedDescription ?? VacancyHTMLAttributedText.plainText(html))
             return
         }
         builder.notice("Полное описание из detail endpoint HH недоступно.")
@@ -550,11 +576,12 @@ struct VacancyStatisticsReport: Sendable {
 private final class VacancyPDFDocumentBuilder {
     private(set) var document = NSMutableAttributedString()
 
-    private static let bodyFont = NSFont.systemFont(ofSize: 7.5)
-    private static let labelFont = NSFont.systemFont(ofSize: 9.5, weight: .semibold)
-    private static let headingFont = NSFont.systemFont(ofSize: 13, weight: .bold)
-    private static let titleFont = NSFont.systemFont(ofSize: 18, weight: .bold)
-    private static let bannerFont = NSFont.systemFont(ofSize: 7.5, weight: .semibold)
+    // Computed: NSFont is not Sendable, so no shared static instances across actors.
+    private static var bodyFont: NSFont { .systemFont(ofSize: 7.5) }
+    private static var labelFont: NSFont { .systemFont(ofSize: 9.5, weight: .semibold) }
+    private static var headingFont: NSFont { .systemFont(ofSize: 13, weight: .bold) }
+    private static var titleFont: NSFont { .systemFont(ofSize: 18, weight: .bold) }
+    private static var bannerFont: NSFont { .systemFont(ofSize: 7.5, weight: .semibold) }
 
     func banner(_ text: String) {
         append(text.uppercased() + "\n", attributes: [
@@ -657,14 +684,13 @@ private final class VacancyPDFDocumentBuilder {
         }
     }
 
-    func html(_ html: String) {
+    func html(_ content: NSAttributedString) {
         if !document.string.hasSuffix("\n\n") {
             document.append(NSAttributedString(
                 string: "\n",
                 attributes: [.font: Self.bodyFont, .foregroundColor: NSColor.black]
             ))
         }
-        let content = VacancyHTMLAttributedText.convert(html)
         document.append(content)
         if !document.string.hasSuffix("\n") { document.append(NSAttributedString(string: "\n")) }
     }
@@ -720,6 +746,14 @@ enum VacancyHTMLAttributedText {
         options: [.caseInsensitive]
     )
 
+    static func plainText(_ html: String) -> NSAttributedString {
+        NSAttributedString(
+            string: html.readableHTMLText,
+            attributes: [.font: NSFont.systemFont(ofSize: 7.5), .foregroundColor: NSColor.black]
+        )
+    }
+
+    @MainActor
     static func convert(_ html: String) -> NSAttributedString {
         let sanitized = sanitize(html)
         let wrapped = """
@@ -732,10 +766,7 @@ enum VacancyHTMLAttributedText {
                           .characterEncoding: String.Encoding.utf8.rawValue],
                 documentAttributes: nil
               ) else {
-            return NSAttributedString(
-                string: html.readableHTMLText,
-                attributes: [.font: NSFont.systemFont(ofSize: 7.5), .foregroundColor: NSColor.black]
-            )
+            return plainText(html)
         }
 
         let fullRange = NSRange(location: 0, length: imported.length)
@@ -916,12 +947,51 @@ struct FavoritePDFExportProgress: Equatable {
     let totalVacancies: Int
 }
 
+/// A vacancy frozen for background rendering, with its HTML description already
+/// imported on the main actor. The attributed string is not mutated after creation.
 struct PDFVacancySnapshot: @unchecked Sendable {
     let value: VacancySearchResult
+    let importedDescription: NSAttributedString?
+
+    @MainActor
+    init(value: VacancySearchResult) {
+        self.value = value
+        importedDescription = VacancyPDFFormatter.importedDescription(for: value)
+    }
+
+    var attributedDocument: NSAttributedString {
+        VacancyPDFFormatter.attributedDocument(for: value, importedDescription: importedDescription)
+    }
 }
 
 struct PDFVacanciesSnapshot: @unchecked Sendable {
-    let values: [VacancySearchResult]
+    let values: [PDFVacancySnapshot]
+
+    @MainActor
+    init(values: [VacancySearchResult]) {
+        var snapshots: [PDFVacancySnapshot] = []
+        snapshots.reserveCapacity(values.count)
+        for value in values { snapshots.append(PDFVacancySnapshot(value: value)) }
+        self.values = snapshots
+    }
+
+    @MainActor
+    init(snapshots: [PDFVacancySnapshot]) {
+        values = snapshots
+    }
+
+    /// Imports descriptions one by one, letting the UI run between vacancies.
+    @MainActor
+    static func make(values: [VacancySearchResult]) async throws -> PDFVacanciesSnapshot {
+        var snapshots: [PDFVacancySnapshot] = []
+        snapshots.reserveCapacity(values.count)
+        for value in values {
+            try Task.checkCancellation()
+            snapshots.append(PDFVacancySnapshot(value: value))
+            await Task.yield()
+        }
+        return PDFVacanciesSnapshot(snapshots: snapshots)
+    }
 }
 
 enum FavoritePDFExportOutcome: Equatable {
@@ -1707,8 +1777,7 @@ actor PDFExportWorker {
         for (index, vacancy) in vacancies.values.enumerated() {
             try Task.checkCancellation()
             let pages = autoreleasepool {
-                let attributed = VacancyPDFFormatter.attributedDocument(for: vacancy)
-                return FavoriteVacanciesPDFExporter.pages(for: attributed)
+                FavoriteVacanciesPDFExporter.pages(for: vacancy.attributedDocument)
             }
             if !currentPages.isEmpty,
                currentPages.count + pages.count > FavoriteVacanciesPDFExporter.maximumPagesPerFile {
@@ -1794,8 +1863,7 @@ actor PDFExportWorker {
     ) throws {
         try Task.checkCancellation()
         let pages = autoreleasepool {
-            let attributed = VacancyPDFFormatter.attributedDocument(for: vacancy.value)
-            return FavoriteVacanciesPDFExporter.pages(for: attributed)
+            FavoriteVacanciesPDFExporter.pages(for: vacancy.attributedDocument)
         }
         try Task.checkCancellation()
         let data = try FavoriteVacanciesPDFExporter.pdfData(for: pages, didRenderPage: didRenderPage)
@@ -1869,7 +1937,7 @@ actor PDFExportWorker {
 
 @MainActor
 final class FavoriteVacanciesPDFExporter: FavoriteVacanciesPDFExporting {
-    static let maximumPagesPerFile = 100
+    nonisolated static let maximumPagesPerFile = 100
 
     struct Page: @unchecked Sendable {
         let content: NSAttributedString
@@ -1925,7 +1993,7 @@ final class FavoriteVacanciesPDFExporter: FavoriteVacanciesPDFExporting {
         let exportStartedAt = now()
         do {
             let prepared = try await worker.prepare(
-                vacancies: PDFVacanciesSnapshot(values: vacancies),
+                vacancies: try await PDFVacanciesSnapshot.make(values: vacancies),
                 progress: progress
             )
             guard let directory = chooseDirectory() else {
