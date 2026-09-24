@@ -21,7 +21,9 @@ enum VacancySearchViews {
                 Divider()
                 if let warning = viewModel.favoritesWarning { warningView(warning) }
                 if !viewModel.isShowingFavorites, let warning = viewModel.collectionWarning {
-                    warningView(warning).accessibilityIdentifier("collectionWarning")
+                    warningView(warning)
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier("collectionWarning")
                 }
                 content
             }

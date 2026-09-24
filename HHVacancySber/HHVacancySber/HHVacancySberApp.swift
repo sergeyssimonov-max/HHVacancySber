@@ -40,8 +40,14 @@ private struct UITestEmployerStore: EmployerConfigurationStoring {
     }
 }
 
+private actor UITestSearchCounter {
+    private var count = 0
+    func next() -> Int { count += 1; return count }
+}
+
 private struct UITestAPIClient: HHVacancyAPIClient {
     let scenario: String
+    let searches = UITestSearchCounter()
     func validateVacanciesAccess() throws {}
     func areaTree() async throws -> HHAreaNode {
         .init(id: "113", name: "Россия", areas: [
@@ -55,6 +61,15 @@ private struct UITestAPIClient: HHVacancyAPIClient {
     }
     func searchVacancies(_ request: HHVacancySearchRequest) async throws -> HHVacancySearchResponse {
         if scenario == "searchError" { throw HHAPIError.requestFailed(statusCode: 503, message: "test") }
+        // "slowSearch" hangs every search; "slowRefresh" answers the first search (one request per
+        // employer) and hangs later ones, so a test can cancel a refresh over existing results.
+        let searchNumber = await searches.next()
+        if scenario == "slowSearch" || (scenario == "slowRefresh" && searchNumber > 2) {
+            try await Task.sleep(nanoseconds: 120_000_000_000)
+        }
+        if scenario == "partial", request.employerID == "2798" {
+            throw HHAPIError.requestFailed(statusCode: 503, message: "test")
+        }
         let summaries = scenario == "security" ? UITestFixtures.securitySummaries : UITestFixtures.summaries
         let values = scenario == "empty" ? [] : summaries.filter { $0.employer?.id == request.employerID }
         let start = request.page * request.perPage

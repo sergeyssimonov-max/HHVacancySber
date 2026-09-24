@@ -274,6 +274,8 @@ final class VacancySearchViewModel: ObservableObject {
             }
             normalizeFilters()
         } catch is CancellationError {
+            // A cancelled first search returns to the initial screen, not to "no vacancies found".
+            if cache == nil { hasSearched = false }
             statusMessage = "Поиск отменён."
         } catch {
             errorMessage = error.localizedDescription
