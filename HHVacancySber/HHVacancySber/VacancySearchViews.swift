@@ -20,6 +20,11 @@ enum VacancySearchViews {
                 statusBar
                 Divider()
                 if let warning = viewModel.favoritesWarning { warningView(warning) }
+                if !viewModel.isShowingFavorites, let warning = viewModel.collectionWarning {
+                    warningView(warning)
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier("collectionWarning")
+                }
                 content
             }
             .background(DeskPalette.content)
@@ -59,19 +64,33 @@ enum VacancySearchViews {
                     .accessibilityHidden(viewModel.updatedAtMessage == nil)
                     .accessibilityIdentifier("vacancyUpdateStatus")
 
-                Button(action: refresh) {
-                    Text(viewModel.isLoading ? "Обновление…" : "Обновить выборку")
+                Button {
+                    if viewModel.isLoading { viewModel.cancelSearch() } else { refresh() }
+                } label: {
+                    Text(refreshButtonTitle)
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
                 .frame(width: ToolbarMetrics.refreshWidth, height: ToolbarMetrics.controlHeight)
-                .disabled(!viewModel.canSearch)
+                .disabled(viewModel.isLoading ? !viewModel.canCancelSearch : !viewModel.canSearch)
+                .help(viewModel.isLoading ? "Остановить загрузку; сохранится предыдущая полная выборка" : "")
                 .accessibilityIdentifier("searchVacanciesButton")
             }
             .controlSize(.large)
-            .padding(.horizontal, 20)
+            // Same trailing inset as the status bar and cards, so the right-hand commands line up.
+            .padding(.horizontal, 28)
             .padding(.vertical, 10)
             .background(DeskPalette.toolbar)
+        }
+
+        private var refreshButtonTitle: String {
+            guard viewModel.isLoading else { return "Обновить выборку" }
+            return viewModel.isCancellingSearch ? "Отмена…" : "Отменить загрузку"
+        }
+
+        private var favoritesExportTitle: String {
+            guard viewModel.isExportingFavoritesPDF else { return "Экспортировать всё в PDF" }
+            return viewModel.isCancellingFavoritesPDFExport ? "Отмена…" : "Отменить экспорт"
         }
 
         @ViewBuilder private var content: some View {
@@ -100,9 +119,15 @@ enum VacancySearchViews {
                     if let progress = viewModel.favoritesPDFExportProgress {
                         ProgressView(value: Double(progress.completedVacancies), total: Double(max(1, progress.totalVacancies))).frame(width: 90)
                     }
-                    PDFExportCommand(title: viewModel.isExportingFavoritesPDF ? "Экспорт…" : "Экспортировать всё в PDF") {
-                        Task { await viewModel.exportFavoriteVacanciesPDF() }
-                    }.disabled(!viewModel.canExportFavoritesPDF)
+                    PDFExportCommand(title: favoritesExportTitle) {
+                        if viewModel.isExportingFavoritesPDF {
+                            viewModel.cancelFavoritesPDFExport()
+                        } else {
+                            viewModel.startFavoritesPDFExport()
+                        }
+                    }.disabled(viewModel.isExportingFavoritesPDF
+                        ? !viewModel.canCancelFavoritesPDFExport
+                        : !viewModel.canExportFavoritesPDF)
                         .accessibilityIdentifier("exportFavoritesPDFButton")
                 }
                 PDFExportCommand(title: viewModel.isExportingStatisticsPDF ? "Сохранение…" : "Статистика в PDF") {
@@ -320,11 +345,14 @@ struct VacancyHTMLDescriptionView: NSViewRepresentable {
         context.coordinator.field = field
         view.loadHTMLString(VacancyHTMLDocument.make(from: html, field: field), baseURL: nil)
     }
+    // The async form matches WKNavigationDelegate on every SDK. The completion-handler
+    // form only nearly matched the Xcode 16 signature and was then never called.
+    @MainActor
     final class Coordinator: NSObject, WKNavigationDelegate {
         var loaded: String?
         var field: VacancyField?
-        func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-            decisionHandler(action.request.url?.scheme == "about" ? .allow : .cancel)
+        func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction) async -> WKNavigationActionPolicy {
+            action.request.url?.scheme == "about" ? .allow : .cancel
         }
     }
 }

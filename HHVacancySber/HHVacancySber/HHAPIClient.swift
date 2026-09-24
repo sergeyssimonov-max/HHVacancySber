@@ -83,6 +83,7 @@ struct HHAPIClient: HHVacancyAPIClient, Sendable {
     private let accessTokenProvider: HHAccessTokenProviding
     private let requestGate: HHRequestGate
     private let maximumRateLimitRetries: Int
+    private let maximumTransientRetries: Int
     private let retrySleep: @Sendable (UInt64) async throws -> Void
     private let retryNow: @Sendable () -> Date
 
@@ -91,6 +92,7 @@ struct HHAPIClient: HHVacancyAPIClient, Sendable {
         accessTokenProvider: HHAccessTokenProviding = HHDefaultAccessTokenProvider(),
         requestGate: HHRequestGate = .shared,
         maximumRateLimitRetries: Int = 2,
+        maximumTransientRetries: Int = 2,
         retrySleep: @escaping @Sendable (UInt64) async throws -> Void = { try await Task.sleep(nanoseconds: $0) },
         retryNow: @escaping @Sendable () -> Date = { Date() }
     ) {
@@ -98,6 +100,7 @@ struct HHAPIClient: HHVacancyAPIClient, Sendable {
         self.accessTokenProvider = accessTokenProvider
         self.requestGate = requestGate
         self.maximumRateLimitRetries = min(2, max(0, maximumRateLimitRetries))
+        self.maximumTransientRetries = min(2, max(0, maximumTransientRetries))
         self.retrySleep = retrySleep
         self.retryNow = retryNow
     }
@@ -191,15 +194,30 @@ struct HHAPIClient: HHVacancyAPIClient, Sendable {
         return max(backoff, seconds)
     }
 
+    // Short connection failures and gateway errors: one lost request must not end a long collection.
+    // Offline and TLS failures are not retried: waiting does not fix them.
+    static let transientURLErrorCodes: Set<URLError.Code> = [
+        .timedOut, .networkConnectionLost, .cannotConnectToHost, .dnsLookupFailed, .cannotFindHost
+    ]
+    static let transientStatusCodes: Set<Int> = [500, 502, 503, 504]
+
     private func data(for request: URLRequest) async throws -> Data {
         try await requestGate.perform {
             var retryCount = 0
+            var transientRetryCount = 0
             while true {
                 try Task.checkCancellation()
                 let data: Data
                 let response: URLResponse
                 do { (data, response) = try await session.data(for: request) }
                 catch let error as URLError where error.code == .cancelled { throw CancellationError() }
+                catch let error as URLError where Self.transientURLErrorCodes.contains(error.code)
+                    && transientRetryCount < maximumTransientRetries {
+                    let delay = Self.rateLimitDelay(header: nil, now: retryNow(), attempt: transientRetryCount) ?? 1
+                    transientRetryCount += 1
+                    try await retrySleep(UInt64(delay * 1_000_000_000))
+                    continue
+                }
                 guard let http = response as? HTTPURLResponse else { throw HHAPIError.invalidResponse }
                 if (200...299).contains(http.statusCode) { return data }
                 let body = try? JSONDecoder().decode(HHErrorResponse.self, from: data)
@@ -215,6 +233,17 @@ struct HHAPIClient: HHVacancyAPIClient, Sendable {
                     }
                     retryCount += 1
                     // Keep the shared gate while waiting: queued work cannot overtake a retry.
+                    try await retrySleep(UInt64(delay * 1_000_000_000))
+                case let code where Self.transientStatusCodes.contains(code) && transientRetryCount < maximumTransientRetries:
+                    // Same Retry-After policy as 429: a longer server delay ends the request.
+                    guard let delay = Self.rateLimitDelay(
+                        header: http.value(forHTTPHeaderField: "Retry-After"),
+                        now: retryNow(),
+                        attempt: transientRetryCount
+                    ) else {
+                        throw HHAPIError.requestFailed(statusCode: code, message: body?.description)
+                    }
+                    transientRetryCount += 1
                     try await retrySleep(UInt64(delay * 1_000_000_000))
                 default: throw HHAPIError.requestFailed(statusCode: http.statusCode, message: body?.description)
                 }

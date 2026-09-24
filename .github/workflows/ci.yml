@@ -4,6 +4,11 @@ on:
   push:
   pull_request:
 
+# A newer push to the same branch supersedes the running checks.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-and-test:
     runs-on: macos-15
@@ -36,3 +41,43 @@ jobs:
           xcodebuild -project HHVacancySber.xcodeproj -scheme HHVacancySber
           -configuration Debug -destination 'platform=macOS,arch=arm64'
           CODE_SIGNING_ALLOWED=NO test -only-testing:HHVacancySberTests
+
+  # Same compiler settings as scripts/release.sh: CI must fail where the release build fails.
+  release-build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build Release with strict concurrency
+        working-directory: HHVacancySber
+        run: >-
+          xcodebuild -project HHVacancySber.xcodeproj -scheme HHVacancySber
+          -configuration Release -destination 'platform=macOS,arch=arm64'
+          -disableAutomaticPackageResolution
+          SWIFT_STRICT_CONCURRENCY=complete
+          SWIFT_TREAT_WARNINGS_AS_ERRORS=YES
+          GCC_TREAT_WARNINGS_AS_ERRORS=YES
+          CODE_SIGNING_ALLOWED=NO build
+
+  ui-tests:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      # XCUITest launches the app and its runner, so both are signed ad hoc
+      # instead of skipping signing as the unit-test job does.
+      - name: Test UI
+        working-directory: HHVacancySber
+        run: >-
+          xcodebuild -project HHVacancySber.xcodeproj -scheme HHVacancySber
+          -configuration Debug -destination 'platform=macOS,arch=arm64'
+          -resultBundlePath "$RUNNER_TEMP/UITests.xcresult"
+          CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM=
+          test -only-testing:HHVacancySberUITests
+      - name: Upload UI test results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-test-results
+          path: ${{ runner.temp }}/UITests.xcresult
+          retention-days: 7

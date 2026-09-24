@@ -221,6 +221,76 @@ final class HHVacancySberUITests: XCTestCase {
         XCTAssertTrue(app.buttons["favoriteVacancy.ui-security"].label.contains("В избранном"))
     }
 
+    func testCancellingRefreshKeepsPreviousResults() {
+        let app = launch(scenario: "slowRefresh")
+        let button = app.buttons["searchVacanciesButton"]
+        XCTAssertTrue(button.waitForExistence(timeout: 5))
+        button.click()
+        XCTAssertTrue(app.staticTexts["vacancyTitle.ui-1"].waitForExistence(timeout: 8))
+
+        button.click()
+        XCTAssertTrue(waitForLabel("Отменить загрузку", of: button), "Refresh must turn the button into a cancel command")
+        XCTAssertTrue(button.isEnabled)
+        let loading = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
+        loading.name = "Refresh in progress with cancel command"
+        loading.lifetime = .keepAlways
+        add(loading)
+
+        button.click()
+        XCTAssertTrue(waitForLabel("Обновить выборку", of: button, timeout: 10), "Cancelled refresh must end promptly")
+        XCTAssertTrue(app.staticTexts["vacancyTitle.ui-1"].exists, "Previous results stay after cancellation")
+        XCTAssertFalse(app.descendants(matching: .any)["collectionWarning"].exists)
+    }
+
+    func testCancellingFirstSearchReturnsToInitialScreen() {
+        let app = launch(scenario: "slowSearch")
+        let button = app.buttons["searchVacanciesButton"]
+        XCTAssertTrue(button.waitForExistence(timeout: 5))
+        button.click()
+        XCTAssertTrue(waitForLabel("Отменить загрузку", of: button))
+        XCTAssertTrue(app.staticTexts["Загружаем вакансии всех настроенных работодателей…"].exists)
+
+        button.click()
+        XCTAssertTrue(waitForLabel("Обновить выборку", of: button, timeout: 10))
+        let emptyButton = app.buttons["emptyRefreshVacanciesButton"]
+        XCTAssertTrue(emptyButton.waitForExistence(timeout: 5))
+        XCTAssertEqual(emptyButton.label, "Обновить выборку")
+        XCTAssertFalse(app.staticTexts["Вакансий не найдено"].exists)
+    }
+
+    func testPartialSearchShowsReceivedVacanciesAndWarning() {
+        let app = launch(scenario: "partial")
+        app.buttons["searchVacanciesButton"].click()
+        XCTAssertTrue(app.staticTexts["vacancyTitle.ui-1"].waitForExistence(timeout: 8))
+        XCTAssertFalse(app.staticTexts["vacancyTitle.ui-3"].exists, "The failed employer contributes no rows")
+
+        let warning = app.descendants(matching: .any)["collectionWarning"]
+        XCTAssertTrue(warning.waitForExistence(timeout: 5))
+        // macOS exposes static text in `value`; `label` may be empty.
+        let warningText = [warning.label, warning.value as? String ?? ""].joined(separator: " ")
+        XCTAssertTrue(warningText.contains("Выгрузка неполная"), warningText)
+        XCTAssertTrue(warningText.contains("СберРешения"), warningText)
+        let attachment = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
+        attachment.name = "Partial search warning"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+
+        let favoriteMode = app.radioButtons.matching(NSPredicate(format: "label BEGINSWITH %@", "Избранное")).firstMatch
+        XCTAssertTrue(favoriteMode.waitForExistence(timeout: 5))
+        favoriteMode.click()
+        XCTAssertTrue(waitForDisappearance(of: warning), "The warning belongs to the vacancy list, not to favorites")
+    }
+
+    private func waitForLabel(_ label: String, of element: XCUIElement, timeout: TimeInterval = 5) -> Bool {
+        let expectation = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", label), object: element)
+        return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
+    }
+
+    private func waitForDisappearance(of element: XCUIElement, timeout: TimeInterval = 5) -> Bool {
+        let expectation = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: element)
+        return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
+    }
+
     private func choose(_ option: String, from pickerIdentifier: String, in app: XCUIApplication) {
         let picker = app.descendants(matching: .any)[pickerIdentifier]
         guard picker.waitForExistence(timeout: 5) else {

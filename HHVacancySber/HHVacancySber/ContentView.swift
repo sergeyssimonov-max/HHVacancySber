@@ -21,7 +21,7 @@ struct ContentView: View {
     var body: some View {
         VacancySearchViews.MainWindow(
             viewModel: viewModel,
-            refresh: { Task { await viewModel.refreshVacancies() } }
+            refresh: { viewModel.startRefresh() }
         )
         .frame(
             minWidth: WindowLayoutPolicy.minimumSize.width,

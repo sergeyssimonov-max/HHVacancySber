@@ -17,6 +17,7 @@ struct VacancyFilterOption: Identifiable, Equatable {
 private struct VacancySearchCache {
     let values: [VacancySearchResult]
     let updatedAt: Date
+    let issues: [VacancyCollectionIssue]
 }
 
 @MainActor
@@ -38,7 +39,11 @@ final class VacancySearchViewModel: ObservableObject {
     @Published private(set) var statusMessage: String?
     @Published private(set) var updatedAtMessage: String?
     @Published private(set) var favoritesWarning: String?
+    /// Employers read incompletely by the last successful search.
+    @Published private(set) var collectionWarning: String?
     @Published private(set) var hasSearched = false
+    @Published private(set) var isCancellingSearch = false
+    @Published private(set) var isCancellingFavoritesPDFExport = false
     @Published var displayMode: VacancyListMode = .all {
         didSet {
             normalizeFilters()
@@ -58,6 +63,10 @@ final class VacancySearchViewModel: ObservableObject {
     private var detailsCache: [String: HHVacancyDetails] = [:]
     private var cache: VacancySearchCache?
     private var detailTask: Task<Void, Never>?
+    private var searchTask: Task<Void, Never>?
+    private var favoritesExportTask: Task<Void, Never>?
+    // Detail state for favorites shown from the offline snapshot, outside `results`.
+    @Published private var offlineDetailStates: [String: (isLoading: Bool, errorMessage: String?)] = [:]
     private var saveTask: Task<Void, Never>?
     private var pendingPersistenceSnapshot: (revision: Int, values: [FavoriteVacancyRecord])?
     private var persistenceRevision = 0
@@ -84,9 +93,11 @@ final class VacancySearchViewModel: ObservableObject {
         self.currentDate = currentDate
     }
 
-    deinit { detailTask?.cancel(); saveTask?.cancel() }
+    deinit { detailTask?.cancel(); saveTask?.cancel(); searchTask?.cancel(); favoritesExportTask?.cancel() }
 
-    var canSearch: Bool { isPersistenceLoaded && !isLoading }
+    var canSearch: Bool { isPersistenceLoaded && !isLoading && searchTask == nil }
+    var canCancelSearch: Bool { searchTask != nil && !isCancellingSearch }
+    var canCancelFavoritesPDFExport: Bool { favoritesExportTask != nil && !isCancellingFavoritesPDFExport }
     var isShowingFavorites: Bool { displayMode == .favorites }
     var canExportFavoritesPDF: Bool { !favorites.isEmpty && !isExportingFavoritesPDF && !isExportingStatisticsPDF }
     var canExportStatisticsPDF: Bool {
@@ -148,7 +159,12 @@ final class VacancySearchViewModel: ObservableObject {
         case .all: return results
         case .favorites:
             let live = Dictionary(uniqueKeysWithValues: results.map { ($0.id, $0) })
-            return favorites.map { live[$0.id] ?? $0.searchResult }
+            return favorites.map { favorite in
+                if let value = live[favorite.id] { return value }
+                let value = favorite.searchResult
+                guard let state = offlineDetailStates[favorite.id] else { return value }
+                return value.updatingDetailState(isLoading: state.isLoading, errorMessage: state.errorMessage)
+            }
         }
     }
 
@@ -165,11 +181,42 @@ final class VacancySearchViewModel: ObservableObject {
     func search() async { await performSearch(useCache: true) }
     func refreshVacancies() async { await performSearch(useCache: false) }
 
+    /// Starts a refresh owned by the model, so the UI can cancel it.
+    func startRefresh() {
+        guard canSearch else { return }
+        searchTask = Task { [weak self] in
+            await self?.refreshVacancies()
+            self?.searchTask = nil
+            self?.isCancellingSearch = false
+        }
+    }
+
+    func cancelSearch() {
+        guard canCancelSearch else { return }
+        isCancellingSearch = true
+        searchTask?.cancel()
+    }
+
+    func startFavoritesPDFExport() {
+        guard favoritesExportTask == nil, canExportFavoritesPDF else { return }
+        favoritesExportTask = Task { [weak self] in
+            await self?.exportFavoriteVacanciesPDF()
+            self?.favoritesExportTask = nil
+            self?.isCancellingFavoritesPDFExport = false
+        }
+    }
+
+    func cancelFavoritesPDFExport() {
+        guard canCancelFavoritesPDFExport else { return }
+        isCancellingFavoritesPDFExport = true
+        favoritesExportTask?.cancel()
+    }
+
     private func performSearch(useCache: Bool) async {
         await loadPersistenceIfNeeded()
         guard !isLoading else { return }
         let now = currentDate()
-        if useCache, let cache, now.timeIntervalSince(cache.updatedAt) >= 0,
+        if useCache, let cache, cache.issues.isEmpty, now.timeIntervalSince(cache.updatedAt) >= 0,
            now.timeIntervalSince(cache.updatedAt) < Self.searchCacheTTL {
             resultsRevision += 1
             results = cache.values
@@ -191,11 +238,11 @@ final class VacancySearchViewModel: ObservableObject {
             let areaSnapshot = try await areaStore.load(using: apiClient)
             if let warning = areaSnapshot.warning { statusMessage = warning }
             let collector = VacancyCollectionService(client: apiClient, now: currentDate)
-            let summaries = try await collector.collect(employers: employers, areas: areaSnapshot.index) { [weak self] progress in
+            let collection = try await collector.collect(employers: employers, areas: areaSnapshot.index) { [weak self] progress in
                 self?.statusMessage = "\(progress.employerName): загружено \(progress.loadedCount), \(progress.partition)."
             }
             try Task.checkCancellation()
-            let values = orderedNewestFirst(summaries.map { summary -> VacancySearchResult in
+            let values = orderedNewestFirst(collection.vacancies.map { summary -> VacancySearchResult in
                 let fallback = HHVacancyDetails(
                     id: summary.id,
                     name: summary.name,
@@ -217,11 +264,18 @@ final class VacancySearchViewModel: ObservableObject {
             })
             resultsRevision += 1
             results = values
-            cache = VacancySearchCache(values: values, updatedAt: now)
+            cache = VacancySearchCache(values: values, updatedAt: now, issues: collection.issues)
             updatedAtMessage = timeMessage(now)
-            statusMessage = values.isEmpty ? "У выбранных работодателей нет открытых вакансий." : "Готово: \(values.count) уникальных вакансий."
+            collectionWarning = Self.makeCollectionWarning(for: collection.issues)
+            if collection.isComplete {
+                statusMessage = values.isEmpty ? "У выбранных работодателей нет открытых вакансий." : "Готово: \(values.count) уникальных вакансий."
+            } else {
+                statusMessage = "Готово с пропусками: \(values.count) уникальных вакансий, неполностью загружено работодателей: \(collection.issues.count)."
+            }
             normalizeFilters()
         } catch is CancellationError {
+            // A cancelled first search returns to the initial screen, not to "no vacancies found".
+            if cache == nil { hasSearched = false }
             statusMessage = "Поиск отменён."
         } catch {
             errorMessage = error.localizedDescription
@@ -229,15 +283,25 @@ final class VacancySearchViewModel: ObservableObject {
         }
     }
 
+    static func makeCollectionWarning(for issues: [VacancyCollectionIssue]) -> String? {
+        guard !issues.isEmpty else { return nil }
+        let shown = issues.prefix(3).map(\.message).joined(separator: ". ")
+        let rest = issues.count > 3 ? ". Еще работодателей с пропусками: \(issues.count - 3)" : ""
+        return "Выгрузка неполная. \(shown)\(rest). Показаны полученные вакансии, повторите обновление позже."
+    }
+
     func toggleExplanation(for id: String) {
-        if expandedVacancyID == id { expandedVacancyID = nil; detailTask?.cancel(); return }
+        if expandedVacancyID == id { expandedVacancyID = nil; detailTask?.cancel(); offlineDetailStates[id] = nil; return }
         expandedVacancyID = id
         detailTask?.cancel()
         detailTask = Task { [weak self] in await self?.loadVacancyDetails(id: id) }
     }
 
     func loadVacancyDetails(id: String) async {
-        guard let index = results.firstIndex(where: { $0.id == id }) else { return }
+        guard let index = results.firstIndex(where: { $0.id == id }) else {
+            await loadOfflineFavoriteDetails(id: id)
+            return
+        }
         let revision = resultsRevision
         if let cached = detailsCache[id] { apply(details: cached, at: index); return }
         let current = results[index]
@@ -259,6 +323,42 @@ final class VacancySearchViewModel: ObservableObject {
             if let newIndex = results.firstIndex(where: { $0.id == id }) {
                 results[newIndex] = results[newIndex].updatingDetailState(isLoading: false, errorMessage: "Не удалось загрузить описание: \(error.localizedDescription)")
             }
+        }
+    }
+
+    /// A favorite that is not in the current results is shown from its stored
+    /// snapshot; loading details updates and persists that snapshot.
+    private func loadOfflineFavoriteDetails(id: String) async {
+        guard let favorite = favorites.first(where: { $0.id == id }), favorite.detailsSnapshot == nil else { return }
+        offlineDetailStates[id] = (true, nil)
+        do {
+            let details: HHVacancyDetails
+            if let cached = detailsCache[id] {
+                details = cached
+            } else {
+                details = try await apiClient.vacancyDetails(id: id)
+            }
+            try Task.checkCancellation()
+            detailsCache[id] = details
+            offlineDetailStates[id] = nil
+            guard let index = favorites.firstIndex(where: { $0.id == id }) else { return }
+            let old = favorites[index].searchResult
+            let value = VacancySearchResult(
+                id: old.id,
+                summary: old.summary,
+                details: details,
+                location: old.location,
+                isDetailLoaded: true,
+                persistedSalaryText: old.persistedSalaryText,
+                isArchived: details.archived ?? old.isArchived,
+                archiveCheckedAt: details.archived == nil ? old.archiveCheckedAt : currentDate()
+            )
+            if favorites[index].update(from: value, at: currentDate()) { persistFavorites() }
+            statusMessage = "Описание вакансии загружено."
+        } catch is CancellationError {
+            offlineDetailStates[id] = nil
+        } catch {
+            offlineDetailStates[id] = (false, "Не удалось загрузить описание: \(error.localizedDescription)")
         }
     }
 
@@ -350,9 +450,9 @@ final class VacancySearchViewModel: ObservableObject {
                 favorites[index].updateArchiveStatus(archived, checkedAt: currentDate())
                 didUpdate = true
             } catch let error as HHAPIError where error.isNotFound {
+                // A vacancy removed from hh.ru is no longer available to apply for.
                 guard let index = favoriteIndex(for: id, cachedIndices: &favoriteIndicesByID) else { continue }
-                let archived = favorites[index].isArchived
-                favorites[index].updateArchiveStatus(archived, checkedAt: currentDate())
+                favorites[index].updateArchiveStatus(true, checkedAt: currentDate())
                 didUpdate = true
             } catch is CancellationError {
                 break
@@ -411,7 +511,7 @@ final class VacancySearchViewModel: ObservableObject {
         guard panel.runModal() == .OK, let destination = panel.url else { return false }
         do {
             let prepared = try await preparedForPDF(source)
-            let worker = PDFExportWorker(fileManager: PDFFileManager(.default))
+            let worker = PDFExportWorker()
             try await worker.exportPersonal(
                 vacancy: PDFVacancySnapshot(value: prepared),
                 destination: destination
@@ -442,8 +542,6 @@ final class VacancySearchViewModel: ObservableObject {
             switch outcome {
             case .cancelled: break
             case .exported(let files, let pages): statusMessage = "Сохранено PDF: \(files), страниц: \(pages)."
-            case .exportedWithCleanupWarning(let files, let pages, let directory):
-                statusMessage = "Сохранено PDF: \(files), страниц: \(pages). Служебный каталог: \(directory.path)."
             }
         } catch is CancellationError {
             statusMessage = "Сохранение избранного в PDF отменено."
@@ -458,6 +556,9 @@ final class VacancySearchViewModel: ObservableObject {
         var note = "Отчёт по локальной выборке на момент нажатия кнопки. Дополнительная проверка HH.ru не выполнялась."
         if let cache {
             note += " Последняя загрузка общего списка: \(cache.updatedAt.formatted(date: .numeric, time: .shortened))."
+        }
+        if let cache, !cache.issues.isEmpty {
+            note += " Выгрузка общего списка неполная, работодателей с пропусками: \(cache.issues.count)."
         }
         if errorMessage != nil { note += " Последнее обновление не завершено; использованы сохранённые данные." }
         return VacancyStatisticsReport(
@@ -482,7 +583,7 @@ final class VacancySearchViewModel: ObservableObject {
         let report = statisticsReportSnapshot()
         guard let destination = statisticsPDFDestination(report.fileName) else { return }
         do {
-            let worker = PDFExportWorker(fileManager: PDFFileManager(.default))
+            let worker = PDFExportWorker()
             try await worker.exportStatistics(report: report, destination: destination)
             statisticsPDFExportMessage = "Статистический отчёт сохранён: \(report.entries.count) вакансий."
         } catch is CancellationError {
@@ -547,6 +648,7 @@ final class VacancySearchViewModel: ObservableObject {
         if let id = expandedVacancyID, !displayedResults.contains(where: { $0.id == id }) {
             expandedVacancyID = nil
             detailTask?.cancel()
+            offlineDetailStates[id] = nil
         }
     }
     private func normalizeFilters() {

@@ -200,7 +200,26 @@ enum PDFVisualContentValidator {
 }
 
 enum VacancyPDFFormatter {
+    /// Imports the description on the calling (main) actor and builds the document.
+    @MainActor
     static func attributedDocument(for vacancy: VacancySearchResult) -> NSAttributedString {
+        attributedDocument(for: vacancy, importedDescription: importedDescription(for: vacancy))
+    }
+
+    /// AppKit imports HTML through WebKit, which is main-thread only. Import here and pass
+    /// the result to background rendering instead of importing inside PDFExportWorker.
+    @MainActor
+    static func importedDescription(for vacancy: VacancySearchResult) -> NSAttributedString? {
+        guard let html = descriptionHTML(for: vacancy) else { return nil }
+        return VacancyHTMLAttributedText.convert(html)
+    }
+
+    /// Safe off the main actor: HTML is never imported here. A description that was not
+    /// imported in advance falls back to plain text.
+    static func attributedDocument(
+        for vacancy: VacancySearchResult,
+        importedDescription: NSAttributedString?
+    ) -> NSAttributedString {
         let builder = VacancyPDFDocumentBuilder()
         let details = vacancy.details
 
@@ -233,7 +252,7 @@ enum VacancyPDFFormatter {
 
         appendSalary(details: details, fallbackText: vacancy.salaryText, to: builder)
         appendEmployment(details, to: builder)
-        appendDescription(vacancy, to: builder)
+        appendDescription(vacancy, importedDescription: importedDescription, to: builder)
 
         let skills = names(details.keySkills)
         if !skills.isEmpty {
@@ -335,11 +354,18 @@ enum VacancyPDFFormatter {
         builder.field("Ночные смены", yesNo(details.nightShifts))
     }
 
-    private static func appendDescription(_ vacancy: VacancySearchResult, to builder: VacancyPDFDocumentBuilder) {
+    private static func descriptionHTML(for vacancy: VacancySearchResult) -> String? {
+        vacancy.details.description?.nilIfBlank ?? vacancy.details.brandedDescription?.nilIfBlank
+    }
+
+    private static func appendDescription(
+        _ vacancy: VacancySearchResult,
+        importedDescription: NSAttributedString?,
+        to builder: VacancyPDFDocumentBuilder
+    ) {
         builder.section("Описание вакансии")
-        if let html = vacancy.details.description?.nilIfBlank
-            ?? vacancy.details.brandedDescription?.nilIfBlank {
-            builder.html(html)
+        if let html = descriptionHTML(for: vacancy) {
+            builder.html(importedDescription ?? VacancyHTMLAttributedText.plainText(html))
             return
         }
         builder.notice("Полное описание из detail endpoint HH недоступно.")
@@ -550,11 +576,12 @@ struct VacancyStatisticsReport: Sendable {
 private final class VacancyPDFDocumentBuilder {
     private(set) var document = NSMutableAttributedString()
 
-    private static let bodyFont = NSFont.systemFont(ofSize: 7.5)
-    private static let labelFont = NSFont.systemFont(ofSize: 9.5, weight: .semibold)
-    private static let headingFont = NSFont.systemFont(ofSize: 13, weight: .bold)
-    private static let titleFont = NSFont.systemFont(ofSize: 18, weight: .bold)
-    private static let bannerFont = NSFont.systemFont(ofSize: 7.5, weight: .semibold)
+    // Computed: NSFont is not Sendable, so no shared static instances across actors.
+    private static var bodyFont: NSFont { .systemFont(ofSize: 7.5) }
+    private static var labelFont: NSFont { .systemFont(ofSize: 9.5, weight: .semibold) }
+    private static var headingFont: NSFont { .systemFont(ofSize: 13, weight: .bold) }
+    private static var titleFont: NSFont { .systemFont(ofSize: 18, weight: .bold) }
+    private static var bannerFont: NSFont { .systemFont(ofSize: 7.5, weight: .semibold) }
 
     func banner(_ text: String) {
         append(text.uppercased() + "\n", attributes: [
@@ -657,14 +684,13 @@ private final class VacancyPDFDocumentBuilder {
         }
     }
 
-    func html(_ html: String) {
+    func html(_ content: NSAttributedString) {
         if !document.string.hasSuffix("\n\n") {
             document.append(NSAttributedString(
                 string: "\n",
                 attributes: [.font: Self.bodyFont, .foregroundColor: NSColor.black]
             ))
         }
-        let content = VacancyHTMLAttributedText.convert(html)
         document.append(content)
         if !document.string.hasSuffix("\n") { document.append(NSAttributedString(string: "\n")) }
     }
@@ -720,6 +746,14 @@ enum VacancyHTMLAttributedText {
         options: [.caseInsensitive]
     )
 
+    static func plainText(_ html: String) -> NSAttributedString {
+        NSAttributedString(
+            string: html.readableHTMLText,
+            attributes: [.font: NSFont.systemFont(ofSize: 7.5), .foregroundColor: NSColor.black]
+        )
+    }
+
+    @MainActor
     static func convert(_ html: String) -> NSAttributedString {
         let sanitized = sanitize(html)
         let wrapped = """
@@ -732,10 +766,7 @@ enum VacancyHTMLAttributedText {
                           .characterEncoding: String.Encoding.utf8.rawValue],
                 documentAttributes: nil
               ) else {
-            return NSAttributedString(
-                string: html.readableHTMLText,
-                attributes: [.font: NSFont.systemFont(ofSize: 7.5), .foregroundColor: NSColor.black]
-            )
+            return plainText(html)
         }
 
         let fullRange = NSRange(location: 0, length: imported.length)
@@ -916,30 +947,56 @@ struct FavoritePDFExportProgress: Equatable {
     let totalVacancies: Int
 }
 
+/// A vacancy frozen for background rendering, with its HTML description already
+/// imported on the main actor. The attributed string is not mutated after creation.
 struct PDFVacancySnapshot: @unchecked Sendable {
     let value: VacancySearchResult
+    let importedDescription: NSAttributedString?
+
+    @MainActor
+    init(value: VacancySearchResult) {
+        self.value = value
+        importedDescription = VacancyPDFFormatter.importedDescription(for: value)
+    }
+
+    var attributedDocument: NSAttributedString {
+        VacancyPDFFormatter.attributedDocument(for: value, importedDescription: importedDescription)
+    }
 }
 
 struct PDFVacanciesSnapshot: @unchecked Sendable {
-    let values: [VacancySearchResult]
+    let values: [PDFVacancySnapshot]
+
+    @MainActor
+    init(values: [VacancySearchResult]) {
+        var snapshots: [PDFVacancySnapshot] = []
+        snapshots.reserveCapacity(values.count)
+        for value in values { snapshots.append(PDFVacancySnapshot(value: value)) }
+        self.values = snapshots
+    }
+
+    @MainActor
+    init(snapshots: [PDFVacancySnapshot]) {
+        values = snapshots
+    }
+
+    /// Imports descriptions one by one, letting the UI run between vacancies.
+    @MainActor
+    static func make(values: [VacancySearchResult]) async throws -> PDFVacanciesSnapshot {
+        var snapshots: [PDFVacancySnapshot] = []
+        snapshots.reserveCapacity(values.count)
+        for value in values {
+            try Task.checkCancellation()
+            snapshots.append(PDFVacancySnapshot(value: value))
+            await Task.yield()
+        }
+        return PDFVacanciesSnapshot(snapshots: snapshots)
+    }
 }
 
 enum FavoritePDFExportOutcome: Equatable {
     case cancelled
     case exported(fileCount: Int, pageCount: Int)
-    case exportedWithCleanupWarning(
-        fileCount: Int,
-        pageCount: Int,
-        directory: PDFRetainedDirectoryLocation
-    )
-}
-
-struct PDFRetainedDirectoryLocation: Equatable, Sendable {
-    let url: URL?
-
-    var path: String {
-        url?.path ?? "текущий путь служебного каталога определить не удалось"
-    }
 }
 
 @MainActor
@@ -950,718 +1007,61 @@ protocol FavoriteVacanciesPDFExporting {
     ) async throws -> FavoritePDFExportOutcome
 }
 
-struct PDFFileIdentity: Equatable, Sendable {
-    let device: UInt64
-    let inode: UInt64
-    let generation: UInt32
-}
-
-final class PDFFileIdentityLease: @unchecked Sendable {
-    let identity: PDFFileIdentity
-    private let descriptor: Int32
-
-    init(identity: PDFFileIdentity, descriptor: Int32) {
-        self.identity = identity
-        self.descriptor = descriptor
-    }
-
-    deinit {
-        Darwin.close(descriptor)
-    }
-}
-
-enum PDFMarkerPersistenceOperation: Equatable, Sendable {
-    case write
-    case markerFsync
-    case directoryFsync
-}
-
-struct PDFMarkerPersistenceFailure: Equatable, Sendable {
-    let operation: PDFMarkerPersistenceOperation
-    let code: Int32
-}
-
-struct PDFMarkerCloseFailure: Equatable, Sendable {
-    let code: Int32
-}
-
-enum PDFTransactionDirectoryError: LocalizedError {
-    case cannotCreateDirectory(URL, Int32)
-    case cannotOpenDirectory(URL, Int32)
-    case cannotInspectDirectory(URL, Int32)
-    case cannotCreateMarker(URL, Int32)
-    case cannotPersistMarker(
-        URL,
-        primary: PDFMarkerPersistenceFailure,
-        secondaryClose: PDFMarkerCloseFailure?
-    )
-    case cannotCloseMarker(URL, Int32)
-
-    var errorDescription: String? {
-        switch self {
-        case .cannotCreateDirectory(let url, let code):
-            return "Не удалось создать служебный каталог PDF \(url.path) (errno \(code))."
-        case .cannotOpenDirectory(let url, let code):
-            return "Не удалось безопасно открыть служебный каталог PDF \(url.path) (errno \(code))."
-        case .cannotInspectDirectory(let url, let code):
-            return "Не удалось проверить служебный каталог PDF \(url.path) (errno \(code))."
-        case .cannotCreateMarker(let url, let code):
-            return "Не удалось создать защитный marker PDF \(url.path) (errno \(code))."
-        case .cannotPersistMarker(let url, let primary, let secondaryClose):
-            let operation: String
-            switch primary.operation {
-            case .write:
-                operation = "записать"
-            case .markerFsync:
-                operation = "синхронизировать"
-            case .directoryFsync:
-                operation = "синхронизировать каталог после записи"
-            }
-            let primaryMessage = "Не удалось \(operation) защитный marker PDF \(url.path) "
-                + "(errno \(primary.code))."
-            guard let secondaryClose else { return primaryMessage }
-            return primaryMessage
-                + " Дополнительно не удалось закрыть descriptor marker "
-                + "(errno \(secondaryClose.code))."
-        case .cannotCloseMarker(let url, let code):
-            return "Не удалось завершить запись защитного marker PDF \(url.path) (errno \(code))."
-        }
-    }
-}
-
-final class PDFTransactionDirectoryLease {
-    let identity: PDFFileIdentity
-    let originalURL: URL
-    private var descriptor: Int32
-
-    init(identity: PDFFileIdentity, originalURL: URL, descriptor: Int32) {
-        self.identity = identity
-        self.originalURL = originalURL
-        self.descriptor = descriptor
-    }
-
-    deinit {
-        close()
-    }
-
-    var isClosed: Bool { descriptor < 0 }
-
-    func currentLocation() -> PDFRetainedDirectoryLocation {
-        guard descriptor >= 0 else { return PDFRetainedDirectoryLocation(url: nil) }
-        var path = [CChar](repeating: 0, count: Int(MAXPATHLEN))
-        guard fcntl(descriptor, F_GETPATH, &path) == 0 else {
-            return PDFRetainedDirectoryLocation(url: nil)
-        }
-        return PDFRetainedDirectoryLocation(url: URL(fileURLWithPath: String(cString: path)))
-    }
-
-    func close() {
-        guard descriptor >= 0 else { return }
-        Darwin.close(descriptor)
-        descriptor = -1
-    }
-
-    func createCleanupForbiddenMarker(
-        named name: String,
-        contents: Data,
-        writeMarker: (Int32, UnsafeRawPointer, Int) -> Int = { Darwin.write($0, $1, $2) },
-        syncDescriptor: (Int32) -> Int32 = { fsync($0) },
-        closeDescriptor: (Int32) -> Int32 = { Darwin.close($0) }
-    ) throws {
-        guard descriptor >= 0 else {
-            throw PDFTransactionDirectoryError.cannotCreateMarker(originalURL, EBADF)
-        }
-        let markerDescriptor = name.withCString {
-            openat(descriptor, $0, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, S_IRUSR | S_IWUSR)
-        }
-        guard markerDescriptor >= 0 else {
-            throw PDFTransactionDirectoryError.cannotCreateMarker(originalURL.appendingPathComponent(name), errno)
-        }
-        var persistenceFailure: PDFMarkerPersistenceFailure?
-        contents.withUnsafeBytes { bytes in
-            guard let baseAddress = bytes.baseAddress else { return }
-            var written = 0
-            while written < bytes.count {
-                let count = writeMarker(
-                    markerDescriptor,
-                    baseAddress.advanced(by: written),
-                    bytes.count - written
-                )
-                if count < 0 {
-                    if errno == EINTR { continue }
-                    persistenceFailure = PDFMarkerPersistenceFailure(operation: .write, code: errno)
-                    return
-                }
-                guard count > 0 else {
-                    persistenceFailure = PDFMarkerPersistenceFailure(operation: .write, code: EIO)
-                    return
-                }
-                written += count
-            }
-        }
-        if persistenceFailure == nil, syncDescriptor(markerDescriptor) != 0 {
-            persistenceFailure = PDFMarkerPersistenceFailure(operation: .markerFsync, code: errno)
-        }
-        if persistenceFailure == nil, syncDescriptor(descriptor) != 0 {
-            persistenceFailure = PDFMarkerPersistenceFailure(operation: .directoryFsync, code: errno)
-        }
-
-        let closeResult = closeDescriptor(markerDescriptor)
-        let closeFailure = closeResult == 0 ? nil : PDFMarkerCloseFailure(code: errno)
-
-        if let persistenceFailure {
-            throw PDFTransactionDirectoryError.cannotPersistMarker(
-                originalURL.appendingPathComponent(name),
-                primary: persistenceFailure,
-                secondaryClose: closeFailure
-            )
-        }
-
-        if let closeFailure {
-            throw PDFTransactionDirectoryError.cannotCloseMarker(
-                originalURL.appendingPathComponent(name),
-                closeFailure.code
-            )
-        }
-    }
-}
-
-protocol PDFFileManaging: Sendable {
-    func fileExists(atPath path: String) -> Bool
-    func contents(at url: URL) throws -> Data
-    func identity(at url: URL) throws -> PDFFileIdentity
-    func identityLease(at url: URL) throws -> PDFFileIdentityLease
-    func createTransactionDirectory(
-        at url: URL,
-        transactionID: String
-    ) throws -> PDFTransactionDirectoryLease
-    func createCleanupForbiddenMarker(
-        in lease: PDFTransactionDirectoryLease,
-        name: String,
-        contents: Data
-    ) throws
-    func createDirectory(at url: URL, withIntermediateDirectories: Bool) throws
-    func moveItem(at source: URL, to destination: URL) throws
-}
-
-final class PDFFileManager: PDFFileManaging, @unchecked Sendable {
-    let value: FileManager
-    init(_ value: FileManager) { self.value = value }
-
-    func fileExists(atPath path: String) -> Bool {
-        value.fileExists(atPath: path)
-    }
-
-    func contents(at url: URL) throws -> Data {
-        try Data(contentsOf: url)
-    }
-
-    func identity(at url: URL) throws -> PDFFileIdentity {
-        var fileInfo = stat()
-        guard lstat(url.path, &fileInfo) == 0 else {
-            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
-        }
-        return PDFFileIdentity(
-            device: UInt64(fileInfo.st_dev),
-            inode: UInt64(fileInfo.st_ino),
-            generation: fileInfo.st_gen
-        )
-    }
-
-    func identityLease(at url: URL) throws -> PDFFileIdentityLease {
-        let descriptor = Darwin.open(url.path, O_RDONLY | O_CLOEXEC)
-        guard descriptor >= 0 else {
-            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
-        }
-        var fileInfo = stat()
-        guard fstat(descriptor, &fileInfo) == 0 else {
-            let code = errno
-            Darwin.close(descriptor)
-            throw NSError(domain: NSPOSIXErrorDomain, code: Int(code))
-        }
-        return PDFFileIdentityLease(
-            identity: PDFFileIdentity(
-                device: UInt64(fileInfo.st_dev),
-                inode: UInt64(fileInfo.st_ino),
-                generation: fileInfo.st_gen
-            ),
-            descriptor: descriptor
-        )
-    }
-
-    func createTransactionDirectory(
-        at url: URL,
-        transactionID: String
-    ) throws -> PDFTransactionDirectoryLease {
-        let parentURL = url.deletingLastPathComponent()
-        let parentDescriptor = Darwin.open(parentURL.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
-        guard parentDescriptor >= 0 else {
-            throw PDFTransactionDirectoryError.cannotOpenDirectory(parentURL, errno)
-        }
-        defer { Darwin.close(parentDescriptor) }
-
-        let name = url.lastPathComponent
-        let createResult = name.withCString { mkdirat(parentDescriptor, $0, S_IRWXU) }
-        guard createResult == 0 else {
-            throw PDFTransactionDirectoryError.cannotCreateDirectory(url, errno)
-        }
-        let descriptor = name.withCString {
-            openat(parentDescriptor, $0, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
-        }
-        guard descriptor >= 0 else {
-            throw PDFTransactionDirectoryError.cannotOpenDirectory(url, errno)
-        }
-        var fileInfo = stat()
-        guard fstat(descriptor, &fileInfo) == 0 else {
-            let code = errno
-            Darwin.close(descriptor)
-            throw PDFTransactionDirectoryError.cannotInspectDirectory(url, code)
-        }
-        return PDFTransactionDirectoryLease(
-            identity: PDFFileIdentity(
-                device: UInt64(fileInfo.st_dev),
-                inode: UInt64(fileInfo.st_ino),
-                generation: fileInfo.st_gen
-            ),
-            originalURL: url,
-            descriptor: descriptor
-        )
-    }
-
-    func createCleanupForbiddenMarker(
-        in lease: PDFTransactionDirectoryLease,
-        name: String,
-        contents: Data
-    ) throws {
-        try lease.createCleanupForbiddenMarker(named: name, contents: contents)
-    }
-
-    func createDirectory(at url: URL, withIntermediateDirectories: Bool) throws {
-        try value.createDirectory(at: url, withIntermediateDirectories: withIntermediateDirectories)
-    }
-
-    func moveItem(at source: URL, to destination: URL) throws {
-        try value.moveItem(at: source, to: destination)
-    }
-
-}
-
-enum PDFDestinationExpectedState: Equatable, Sendable {
-    case absent
-    case existing(digest: Data, identity: PDFFileIdentity)
-}
-
-struct PDFDestinationAuthorization: Equatable, Sendable {
-    let destination: URL
-    let expectedState: PDFDestinationExpectedState
-
-    static func capture(destination: URL, fileSystem: any PDFFileManaging) throws -> Self {
-        guard fileSystem.fileExists(atPath: destination.path) else {
-            return Self(destination: destination, expectedState: .absent)
-        }
-        let initialIdentity = try fileSystem.identity(at: destination)
-        let digest = try digest(of: destination, fileSystem: fileSystem)
-        let finalIdentity = try fileSystem.identity(at: destination)
-        guard initialIdentity == finalIdentity else {
-            throw PDFCollisionStateChangedError.confirmedDestinationChanged(destination: destination)
-        }
-        return Self(
-            destination: destination,
-            expectedState: .existing(digest: digest, identity: finalIdentity)
-        )
-    }
-
-    static func digest(of url: URL, fileSystem: any PDFFileManaging) throws -> Data {
-        Data(SHA256.hash(data: try fileSystem.contents(at: url)))
-    }
-}
-
-struct PDFCollisionPlan: Sendable {
-    let authorizations: [PDFDestinationAuthorization]
-
-    var collidingNames: [String] {
-        authorizations.compactMap { authorization in
-            guard case .existing = authorization.expectedState else { return nil }
-            return authorization.destination.lastPathComponent
-        }
-    }
-}
-
-enum PDFCollisionStateChangedError: LocalizedError {
-    case appearedAfterConfirmation(destination: URL)
-    case confirmedDestinationChanged(destination: URL)
-    case destinationReappearedAfterBackup(destination: URL)
-    case publishedDestinationChangedBeforeRollback(destination: URL)
-
-    var errorDescription: String? {
-        switch self {
-        case .appearedAfterConfirmation(let destination):
-            return "PDF не сохранён: после подтверждения появился файл \(destination.path). Он не был изменён."
-        case .confirmedDestinationChanged(let destination):
-            return "PDF не сохранён: подтверждённый файл изменился до публикации: \(destination.path)."
-        case .destinationReappearedAfterBackup(let destination):
-            return "PDF не сохранён: после резервного копирования снова появился файл \(destination.path). Он не был изменён."
-        case .publishedDestinationChangedBeforeRollback(let destination):
-            return "PDF не сохранён: опубликованный файл был изменён до отката: \(destination.path). Он не был удалён."
-        }
-    }
-}
-
-enum PDFRollbackOperation: String {
-    case removePublishedOutput
-    case preservePublishedOutput
-    case preserveChangedPublishedOutput
-    case restoreOriginal
-}
-
-struct PDFPublishedOutputPreservedError: LocalizedError {
-    let destination: URL
-
-    var errorDescription: String? {
-        "Опубликованный PDF сохранён для ручной очистки: \(destination.path)."
-    }
-}
-
-struct PDFRollbackIssue {
-    let operation: PDFRollbackOperation
-    let destination: URL
-    let underlyingError: Error
-}
-
-struct PDFTransactionRecoveryError: LocalizedError {
-    let originalError: Error
-    let rollbackErrors: [PDFRollbackIssue]
-    let recoveryDirectory: PDFRetainedDirectoryLocation
-    let unrestoredDestinations: [URL]
-    let preservedBackupURLs: [URL]
-
-    var preservedPublishedOutputURLs: [URL] {
-        rollbackErrors.compactMap { issue in
-            switch issue.operation {
-            case .preservePublishedOutput, .preserveChangedPublishedOutput:
-                return issue.destination
-            default:
-                return nil
-            }
-        }
-    }
-
-    var errorDescription: String? {
-        if !preservedPublishedOutputURLs.isEmpty {
-            let preservedPaths = preservedPublishedOutputURLs.map(\.path).joined(separator: ", ")
-            let backupText: String
-            if preservedBackupURLs.isEmpty {
-                backupText = ""
-            } else {
-                let backupPaths = preservedBackupURLs.map(\.path).joined(separator: ", ")
-                backupText = " Резервные копии подтверждённых файлов сохранены: \(backupPaths)."
-            }
-            return "\(originalError.localizedDescription) Экспорт PDF завершился ошибкой. "
-                + "Опубликованные файлы сохранены для ручной очистки: \(preservedPaths)."
-                + backupText
-                + " Каталог восстановления: \(recoveryDirectory.path)."
-        }
-        if !preservedBackupURLs.isEmpty {
-            let preservedPaths = preservedBackupURLs.map(\.path).joined(separator: ", ")
-            return "\(originalError.localizedDescription) Экспорт PDF завершился ошибкой, "
-                + "а автоматическое восстановление выполнено не полностью. "
-                + "Резервные копии сохранены: \(preservedPaths). "
-                + "Каталог восстановления: \(recoveryDirectory.path)."
-        }
-        if rollbackErrors.isEmpty {
-            return "Экспорт PDF завершился ошибкой. Исходные файлы восстановлены. "
-                + "Служебный каталог сохранён для безопасной ручной очистки: \(recoveryDirectory.path)."
-        }
-        return "Экспорт PDF завершился ошибкой, а автоматическое восстановление завершилось с ошибками. "
-            + "Временные данные оставлены в \(recoveryDirectory.path)."
-    }
-}
-
-struct PDFTransactionEntry {
-    let destination: URL
-    let staged: URL
-    let backup: URL
-    let authorization: PDFDestinationAuthorization
-    var originalBackedUp = false
-    var outputPublished = false
-    var publishedDigest: Data?
-    var publishedIdentity: PDFFileIdentity?
-    var publishedIdentityLease: PDFFileIdentityLease?
-    var publishedOutputPreserved = false
-    var partialOutputRemoved = false
-    var originalRestored = false
-}
-
-struct PDFPublicationTransaction {
-    static let cleanupForbiddenMarkerName = ".cleanup_forbidden"
-    private(set) var entries: [PDFTransactionEntry]
-    let transactionDirectory: URL
-    let stagedDirectory: URL
-    let backupDirectory: URL
-    private let fileSystem: any PDFFileManaging
-    private(set) var transactionDirectoryCreated = false
-    private(set) var commitCompleted = false
-    private(set) var transactionDirectoryLease: PDFTransactionDirectoryLease?
-    private(set) var retainedDirectoryLocation: PDFRetainedDirectoryLocation?
-    private var terminalRecoveryError: PDFTransactionRecoveryError?
-    private let transactionID: String
-
-    init(
+/// Writes new files and never replaces one: each name, or its first free `_N` variant,
+/// is created with O_CREAT | O_EXCL, so checking and creating are a single step. If a
+/// later file fails or the task is cancelled, the files this call wrote are removed.
+enum PDFNewFileWriter {
+    static func write(
+        _ contents: [Data],
         names: [String],
-        directory: URL,
-        authorizations: [PDFDestinationAuthorization],
-        fileSystem: any PDFFileManaging
-    ) {
-        let transactionID = UUID().uuidString
-        let transactionDirectory = directory.appendingPathComponent(
-            ".HHVacancySber-PDF-\(transactionID)",
-            isDirectory: true
-        )
-        let stagedDirectory = transactionDirectory.appendingPathComponent("staged", isDirectory: true)
-        let backupDirectory = transactionDirectory.appendingPathComponent("backup", isDirectory: true)
-        self.transactionDirectory = transactionDirectory
-        self.stagedDirectory = stagedDirectory
-        self.backupDirectory = backupDirectory
-        self.fileSystem = fileSystem
-        self.transactionID = transactionID
-        precondition(names.count == authorizations.count)
-        self.entries = zip(names, authorizations).map { name, authorization in
-            let destination = directory.appendingPathComponent(name)
-            precondition(authorization.destination == destination)
-            return PDFTransactionEntry(
-                destination: destination,
-                staged: stagedDirectory.appendingPathComponent(name),
-                backup: backupDirectory.appendingPathComponent(name),
-                authorization: authorization
-            )
+        in directory: URL,
+        maximumCandidates: Int = 10_000,
+        beforeEachFile: (Int) throws -> Void = { _ in }
+    ) throws -> [URL] {
+        guard contents.count == names.count else { throw FavoriteVacanciesPDFExporter.ExportError.missingPreparedExport }
+        var written: [URL] = []
+        do {
+            for (index, (data, name)) in zip(contents, names).enumerated() {
+                try Task.checkCancellation()
+                try beforeEachFile(index)
+                written.append(try writeNewFile(data, name: name, in: directory, maximumCandidates: maximumCandidates))
+            }
+            return written
+        } catch {
+            for url in written { try? FileManager.default.removeItem(at: url) }
+            throw error
         }
     }
 
-    mutating func createDirectories() throws {
-        let lease = try fileSystem.createTransactionDirectory(
-            at: transactionDirectory,
-            transactionID: transactionID
-        )
-        transactionDirectoryLease = lease
-        transactionDirectoryCreated = true
-        try fileSystem.createCleanupForbiddenMarker(
-            in: lease,
-            name: Self.cleanupForbiddenMarkerName,
-            contents: Data(transactionID.utf8)
-        )
-        try fileSystem.createDirectory(at: stagedDirectory, withIntermediateDirectories: false)
-        try fileSystem.createDirectory(at: backupDirectory, withIntermediateDirectories: true)
-    }
-
-    mutating func backupOriginals() throws {
-        for index in entries.indices {
-            try Task.checkCancellation()
-            switch entries[index].authorization.expectedState {
-            case .absent:
-                guard !fileSystem.fileExists(atPath: entries[index].destination.path) else {
-                    throw PDFCollisionStateChangedError.appearedAfterConfirmation(
-                        destination: entries[index].destination
-                    )
-                }
-            case .existing(let expectedDigest, let expectedIdentity):
-                guard fileSystem.fileExists(atPath: entries[index].destination.path) else {
-                    throw PDFCollisionStateChangedError.confirmedDestinationChanged(
-                        destination: entries[index].destination
-                    )
-                }
-                try fileSystem.moveItem(at: entries[index].destination, to: entries[index].backup)
-                entries[index].originalBackedUp = true
-                let movedIdentity = try fileSystem.identity(at: entries[index].backup)
-                let movedDigest = try PDFDestinationAuthorization.digest(
-                    of: entries[index].backup,
-                    fileSystem: fileSystem
-                )
-                guard movedDigest == expectedDigest, movedIdentity == expectedIdentity else {
-                    throw PDFCollisionStateChangedError.confirmedDestinationChanged(
-                        destination: entries[index].destination
-                    )
-                }
-            }
-        }
-    }
-
-    mutating func publish(beforePublishingPart: @Sendable (Int) throws -> Void) throws {
-        for index in entries.indices {
-            try Task.checkCancellation()
-            try beforePublishingPart(index)
-            try Task.checkCancellation()
-            if fileSystem.fileExists(atPath: entries[index].destination.path) {
-                throw collisionErrorBeforePublication(for: entries[index])
-            }
-            let publishedDigest = try PDFDestinationAuthorization.digest(
-                of: entries[index].staged,
-                fileSystem: fileSystem
+    private static func writeNewFile(_ data: Data, name: String, in directory: URL, maximumCandidates: Int) throws -> URL {
+        for number in 1...max(1, maximumCandidates) {
+            let candidate = number == 1 ? name : PDFFileNameBuilder.fileName(
+                base: name, semanticSuffix: String(number), fallback: "vacancy"
             )
-            let publishedIdentityLease = try? fileSystem.identityLease(at: entries[index].staged)
+            let url = directory.appendingPathComponent(candidate)
+            let descriptor = open(url.path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o644)
+            guard descriptor >= 0 else {
+                let code = errno
+                if code == EEXIST { continue }
+                throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+            }
+            let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
             do {
-                try fileSystem.moveItem(at: entries[index].staged, to: entries[index].destination)
+                try handle.write(contentsOf: data)
+                try handle.synchronize()
+                try handle.close()
             } catch {
-                if fileSystem.fileExists(atPath: entries[index].destination.path) {
-                    throw collisionErrorBeforePublication(for: entries[index])
-                }
+                try? handle.close()
+                try? FileManager.default.removeItem(at: url)
                 throw error
             }
-            entries[index].publishedDigest = publishedDigest
-            entries[index].publishedIdentity = publishedIdentityLease?.identity
-            entries[index].publishedIdentityLease = publishedIdentityLease
-            entries[index].outputPublished = true
+            return url
         }
-    }
-
-    private func collisionErrorBeforePublication(
-        for entry: PDFTransactionEntry
-    ) -> PDFCollisionStateChangedError {
-        if entry.originalBackedUp {
-            return .destinationReappearedAfterBackup(destination: entry.destination)
-        }
-        return .appearedAfterConfirmation(destination: entry.destination)
-    }
-
-    mutating func completeCommit() {
-        commitCompleted = true
-    }
-
-    mutating func finalizeAfterCommit(
-        beforeFinalization: @Sendable (URL) throws -> Void = { _ in }
-    ) rethrows -> PDFRetainedDirectoryLocation {
-        precondition(commitCompleted && transactionDirectoryCreated)
-        if let retainedDirectoryLocation { return retainedDirectoryLocation }
-        try beforeFinalization(transactionDirectory)
-        let location = transactionDirectoryLease?.currentLocation()
-            ?? PDFRetainedDirectoryLocation(url: nil)
-        transactionDirectoryLease?.close()
-        retainedDirectoryLocation = location
-        return location
-    }
-
-    mutating func rollback(
-        originalError: Error,
-        beforeFinalization: @Sendable (URL) throws -> Void = { _ in }
-    ) throws {
-        if let terminalRecoveryError { throw terminalRecoveryError }
-        guard !commitCompleted, transactionDirectoryCreated else { return }
-        var rollbackErrors: [PDFRollbackIssue] = []
-
-        for index in entries.indices {
-            var canRestoreOriginal = true
-            if entries[index].publishedOutputPreserved {
-                rollbackErrors.append(PDFRollbackIssue(
-                    operation: .preservePublishedOutput,
-                    destination: entries[index].staged,
-                    underlyingError: PDFPublishedOutputPreservedError(
-                        destination: entries[index].staged
-                    )
-                ))
-            }
-            if entries[index].outputPublished && !entries[index].partialOutputRemoved {
-                let quarantine = entries[index].staged
-                var quarantinedCurrentDestination = false
-                do {
-                    try fileSystem.moveItem(at: entries[index].destination, to: quarantine)
-                    quarantinedCurrentDestination = true
-                    entries[index].outputPublished = false
-                } catch {
-                    if fileSystem.fileExists(atPath: quarantine.path) {
-                        quarantinedCurrentDestination = true
-                        entries[index].outputPublished = false
-                    } else if !fileSystem.fileExists(atPath: entries[index].destination.path) {
-                        entries[index].partialOutputRemoved = true
-                        entries[index].outputPublished = false
-                    } else {
-                        canRestoreOriginal = false
-                        rollbackErrors.append(PDFRollbackIssue(
-                            operation: .removePublishedOutput,
-                            destination: entries[index].destination,
-                            underlyingError: error
-                        ))
-                    }
-                }
-
-                if quarantinedCurrentDestination {
-                    let actualIdentity = try? fileSystem.identity(at: quarantine)
-                    let actualDigest = try? PDFDestinationAuthorization.digest(
-                        of: quarantine,
-                        fileSystem: fileSystem
-                    )
-                    if let expectedDigest = entries[index].publishedDigest,
-                       let expectedIdentity = entries[index].publishedIdentity,
-                       actualDigest == expectedDigest,
-                       actualIdentity == expectedIdentity {
-                        entries[index].publishedOutputPreserved = true
-                        rollbackErrors.append(PDFRollbackIssue(
-                            operation: .preservePublishedOutput,
-                            destination: quarantine,
-                            underlyingError: PDFPublishedOutputPreservedError(
-                                destination: quarantine
-                            )
-                        ))
-                    } else {
-                        canRestoreOriginal = false
-                        var preservedURL = quarantine
-                        do {
-                            try fileSystem.moveItem(at: quarantine, to: entries[index].destination)
-                            preservedURL = entries[index].destination
-                        } catch {
-                            // The quarantined file remains recoverable. A concurrently
-                            // reappeared destination is intentionally left untouched.
-                            entries[index].publishedOutputPreserved = true
-                        }
-                        rollbackErrors.append(PDFRollbackIssue(
-                            operation: .preserveChangedPublishedOutput,
-                            destination: preservedURL,
-                            underlyingError: PDFCollisionStateChangedError
-                                .publishedDestinationChangedBeforeRollback(
-                                    destination: entries[index].destination
-                                )
-                        ))
-                    }
-                }
-            }
-
-            if canRestoreOriginal,
-               entries[index].originalBackedUp && !entries[index].originalRestored {
-                do {
-                    try fileSystem.moveItem(at: entries[index].backup, to: entries[index].destination)
-                    entries[index].originalRestored = true
-                    entries[index].originalBackedUp = false
-                } catch {
-                    rollbackErrors.append(PDFRollbackIssue(
-                        operation: .restoreOriginal,
-                        destination: entries[index].destination,
-                        underlyingError: error
-                    ))
-                }
-            }
-        }
-
-        try beforeFinalization(transactionDirectory)
-        let location = transactionDirectoryLease?.currentLocation()
-            ?? PDFRetainedDirectoryLocation(url: nil)
-        transactionDirectoryLease?.close()
-        retainedDirectoryLocation = location
-        let unresolved = entries.filter { $0.originalBackedUp && !$0.originalRestored }
-        let recovery = PDFTransactionRecoveryError(
-            originalError: originalError,
-            rollbackErrors: rollbackErrors,
-            recoveryDirectory: location,
-            unrestoredDestinations: unresolved.map(\.destination),
-            preservedBackupURLs: unresolved.map(\.backup)
-        )
-        terminalRecoveryError = recovery
-        throw recovery
+        throw FavoriteVacanciesPDFExporter.ExportError.noAvailableFileName
     }
 }
 
 actor PDFExportWorker {
-    private let fileSystem: any PDFFileManaging
-    private let beforePublishingPart: @Sendable (Int) throws -> Void
-    private let validateStagedPart: @Sendable (URL, Int) throws -> Void
-    private let beforeFinalizingTransaction: @Sendable (URL, Bool) throws -> Void
     private struct PreparedPart: Sendable {
         let data: Data
         let pageCount: Int
@@ -1674,24 +1074,7 @@ actor PDFExportWorker {
         let pageCount: Int
     }
 
-    struct Publication: Sendable {
-        let destinations: [URL]
-        let cleanupWarningDirectory: PDFRetainedDirectoryLocation
-    }
-
-    init(
-        fileManager: any PDFFileManaging,
-        beforePublishingPart: @escaping @Sendable (Int) throws -> Void = { _ in },
-        validateStagedPart: @escaping @Sendable (URL, Int) throws -> Void = {
-            try FavoriteVacanciesPDFExporter.validatePDF(at: $0, expectedPages: $1)
-        },
-        beforeFinalizingTransaction: @escaping @Sendable (URL, Bool) throws -> Void = { _, _ in }
-    ) {
-        self.fileSystem = fileManager
-        self.beforePublishingPart = beforePublishingPart
-        self.validateStagedPart = validateStagedPart
-        self.beforeFinalizingTransaction = beforeFinalizingTransaction
-    }
+    init() {}
 
     func prepare(
         vacancies: PDFVacanciesSnapshot,
@@ -1707,8 +1090,7 @@ actor PDFExportWorker {
         for (index, vacancy) in vacancies.values.enumerated() {
             try Task.checkCancellation()
             let pages = autoreleasepool {
-                let attributed = VacancyPDFFormatter.attributedDocument(for: vacancy)
-                return FavoriteVacanciesPDFExporter.pages(for: attributed)
+                FavoriteVacanciesPDFExporter.pages(for: vacancy.attributedDocument)
             }
             if !currentPages.isEmpty,
                currentPages.count + pages.count > FavoriteVacanciesPDFExporter.maximumPagesPerFile {
@@ -1750,43 +1132,6 @@ actor PDFExportWorker {
         return PreparedPart(data: data, pageCount: pages.count)
     }
 
-    func collisionPlan(names: [String], directory: URL) throws -> PDFCollisionPlan {
-        try Task.checkCancellation()
-        return try PDFCollisionPlan(authorizations: names.map { name in
-            try Task.checkCancellation()
-            return try PDFDestinationAuthorization.capture(
-                destination: directory.appendingPathComponent(name),
-                fileSystem: fileSystem
-            )
-        })
-    }
-
-    func availableCollisionPlan(
-        names: [String], directory: URL, maximumCandidates: Int = 10_000
-    ) throws -> PDFCollisionPlan {
-        var reserved = Set<String>()
-        var authorizations: [PDFDestinationAuthorization] = []
-        for name in names {
-            var selected: PDFDestinationAuthorization?
-            for number in 1...max(1, maximumCandidates) {
-                try Task.checkCancellation()
-                let candidate = number == 1 ? name : PDFFileNameBuilder.fileName(
-                    base: name, semanticSuffix: String(number), fallback: "vacancy"
-                )
-                guard reserved.insert(candidate).inserted else { continue }
-                let destination = directory.appendingPathComponent(candidate)
-                guard !fileSystem.fileExists(atPath: destination.path) else { continue }
-                // Publication still checks the captured absent state. A file appearing
-                // after this selection aborts the transaction instead of being replaced.
-                selected = PDFDestinationAuthorization(destination: destination, expectedState: .absent)
-                break
-            }
-            guard let selected else { throw FavoriteVacanciesPDFExporter.ExportError.noAvailableFileName }
-            authorizations.append(selected)
-        }
-        return PDFCollisionPlan(authorizations: authorizations)
-    }
-
     func exportPersonal(
         vacancy: PDFVacancySnapshot,
         destination: URL,
@@ -1794,8 +1139,7 @@ actor PDFExportWorker {
     ) throws {
         try Task.checkCancellation()
         let pages = autoreleasepool {
-            let attributed = VacancyPDFFormatter.attributedDocument(for: vacancy.value)
-            return FavoriteVacanciesPDFExporter.pages(for: attributed)
+            FavoriteVacanciesPDFExporter.pages(for: vacancy.attributedDocument)
         }
         try Task.checkCancellation()
         let data = try FavoriteVacanciesPDFExporter.pdfData(for: pages, didRenderPage: didRenderPage)
@@ -1815,61 +1159,19 @@ actor PDFExportWorker {
         try data.write(to: destination, options: .atomic)
     }
 
-    func publish(
-        names: [String],
-        directory: URL,
-        authorizations: [PDFDestinationAuthorization]
-    ) throws -> Publication {
-        guard let parts = preparedParts, parts.count == names.count else {
+    /// Writes the prepared parts as new files; see PDFNewFileWriter.
+    func writePrepared(names: [String], directory: URL) throws -> [URL] {
+        guard let parts = preparedParts else {
             throw FavoriteVacanciesPDFExporter.ExportError.missingPreparedExport
         }
         preparedParts = nil
-        guard authorizations.count == names.count else {
-            throw FavoriteVacanciesPDFExporter.ExportError.missingPreparedExport
-        }
-        var transaction = PDFPublicationTransaction(
-            names: names,
-            directory: directory,
-            authorizations: authorizations,
-            fileSystem: fileSystem
-        )
-        do {
-            try transaction.createDirectories()
-            for (index, part) in parts.enumerated() {
-                try Task.checkCancellation()
-                let url = transaction.entries[index].staged
-                try part.data.write(to: url, options: .atomic)
-                try validateStagedPart(url, part.pageCount)
-            }
-            try Task.checkCancellation()
-            try transaction.backupOriginals()
-            try transaction.publish(beforePublishingPart: beforePublishingPart)
-            try Task.checkCancellation()
-            let destinations = transaction.entries.map(\.destination)
-            transaction.completeCommit()
-            let cleanupWarningDirectory = try transaction.finalizeAfterCommit {
-                try beforeFinalizingTransaction($0, true)
-            }
-            return Publication(
-                destinations: destinations,
-                cleanupWarningDirectory: cleanupWarningDirectory
-            )
-        } catch {
-            do {
-                try transaction.rollback(originalError: error) {
-                    try beforeFinalizingTransaction($0, false)
-                }
-            } catch let recoveryError as PDFTransactionRecoveryError {
-                throw recoveryError
-            }
-            throw error
-        }
+        return try PDFNewFileWriter.write(parts.map(\.data), names: names, in: directory)
     }
 }
 
 @MainActor
 final class FavoriteVacanciesPDFExporter: FavoriteVacanciesPDFExporting {
-    static let maximumPagesPerFile = 100
+    nonisolated static let maximumPagesPerFile = 100
 
     struct Page: @unchecked Sendable {
         let content: NSAttributedString
@@ -1891,30 +1193,14 @@ final class FavoriteVacanciesPDFExporter: FavoriteVacanciesPDFExporting {
         }
     }
 
-    private let worker: PDFExportWorker
+    private let worker = PDFExportWorker()
     private let chooseDirectory: () -> URL?
-    private let confirmReplacement: ([String]) -> Bool
     private let now: () -> Date
     init(
-        fileManager: FileManager = .default,
-        fileSystem: (any PDFFileManaging)? = nil,
         chooseDirectory: (() -> URL?)? = nil,
-        confirmReplacement: (([String]) -> Bool)? = nil,
-        beforePublishingPart: @escaping @Sendable (Int) throws -> Void = { _ in },
-        validateStagedPart: @escaping @Sendable (URL, Int) throws -> Void = {
-            try FavoriteVacanciesPDFExporter.validatePDF(at: $0, expectedPages: $1)
-        },
-        beforeFinalizingTransaction: @escaping @Sendable (URL, Bool) throws -> Void = { _, _ in },
         now: @escaping () -> Date = Date.init
     ) {
-        self.worker = PDFExportWorker(
-            fileManager: fileSystem ?? PDFFileManager(fileManager),
-            beforePublishingPart: beforePublishingPart,
-            validateStagedPart: validateStagedPart,
-            beforeFinalizingTransaction: beforeFinalizingTransaction
-        )
         self.chooseDirectory = chooseDirectory ?? { FavoriteVacanciesPDFExporter.chooseExportDirectory() }
-        self.confirmReplacement = confirmReplacement ?? { FavoriteVacanciesPDFExporter.confirmReplacement($0) }
         self.now = now
     }
 
@@ -1925,7 +1211,7 @@ final class FavoriteVacanciesPDFExporter: FavoriteVacanciesPDFExporting {
         let exportStartedAt = now()
         do {
             let prepared = try await worker.prepare(
-                vacancies: PDFVacanciesSnapshot(values: vacancies),
+                vacancies: try await PDFVacanciesSnapshot.make(values: vacancies),
                 progress: progress
             )
             guard let directory = chooseDirectory() else {
@@ -1936,17 +1222,8 @@ final class FavoriteVacanciesPDFExporter: FavoriteVacanciesPDFExporting {
             let names = (0..<prepared.partCount).map {
                 Self.fileName(part: $0 + 1, totalParts: prepared.partCount, exportStartedAt: exportStartedAt)
             }
-            let collisionPlan = try await worker.availableCollisionPlan(names: names, directory: directory)
-            let publication = try await worker.publish(
-                names: collisionPlan.authorizations.map { $0.destination.lastPathComponent },
-                directory: directory,
-                authorizations: collisionPlan.authorizations
-            )
-            return .exportedWithCleanupWarning(
-                fileCount: publication.destinations.count,
-                pageCount: prepared.pageCount,
-                directory: publication.cleanupWarningDirectory
-            )
+            let destinations = try await worker.writePrepared(names: names, directory: directory)
+            return .exported(fileCount: destinations.count, pageCount: prepared.pageCount)
         } catch {
             await worker.discardPreparedExport()
             throw error
@@ -1977,15 +1254,6 @@ final class FavoriteVacanciesPDFExporter: FavoriteVacanciesPDFExporting {
             totalParts: totalParts,
             exportStartedAt: exportStartedAt
         )
-    }
-
-    private static func confirmReplacement(_ names: [String]) -> Bool {
-        let alert = NSAlert()
-        alert.messageText = "Заменить существующие PDF-файлы?"
-        alert.informativeText = names.joined(separator: "\n")
-        alert.addButton(withTitle: "Заменить")
-        alert.addButton(withTitle: "Отмена")
-        return alert.runModal() == .alertFirstButtonReturn
     }
 
     nonisolated static func validatePDF(at url: URL, expectedPages: Int) throws {
@@ -2019,59 +1287,68 @@ final class FavoriteVacanciesPDFExporter: FavoriteVacanciesPDFExporting {
         }
     }
 
+    /// Lays the whole document out once, in a single container of unbounded height, and
+    /// cuts pages at line boundaries by vertical position: linear in the document length.
+    /// A paragraph that starts on a page and would cross its end moves to the next page;
+    /// a whitespace-only tail joins the previous page instead of becoming a blank page.
     nonisolated static func pages(for attributedText: NSAttributedString) -> [Page] {
-        let contentSize = NSSize(
-            width: VacancyPDFDefaults.paperSize.width - VacancyPDFDefaults.horizontalMargin * 2,
-            height: VacancyPDFDefaults.paperSize.height - VacancyPDFDefaults.verticalMargin * 2
-                - VacancyPDFDefaults.paginationBottomSafetyMargin
-        )
-        var result: [Page] = []
-        var consumedCharacters = 0
-        while consumedCharacters < attributedText.length {
-            let next: (page: Page, consumed: Int)? = autoreleasepool {
-                let remainingRange = NSRange(
-                    location: consumedCharacters,
-                    length: attributedText.length - consumedCharacters
-                )
-                let remainingText = attributedText.attributedSubstring(from: remainingRange)
-                let textStorage = NSTextStorage(attributedString: remainingText)
-                let layoutManager = NSLayoutManager()
-                textStorage.addLayoutManager(layoutManager)
-                let container = NSTextContainer(size: contentSize)
-                container.lineFragmentPadding = 0
-                layoutManager.addTextContainer(container)
-                layoutManager.ensureLayout(for: container)
-                let glyphRange = layoutManager.glyphRange(for: container)
-                guard glyphRange.length > 0 else { return nil }
-                var characterRange = layoutManager.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
-                guard characterRange.length > 0 else { return nil }
+        guard attributedText.length > 0 else { return [Page(content: attributedText)] }
+        let contentWidth = VacancyPDFDefaults.paperSize.width - VacancyPDFDefaults.horizontalMargin * 2
+        let pageHeight = VacancyPDFDefaults.paperSize.height - VacancyPDFDefaults.verticalMargin * 2
+            - VacancyPDFDefaults.paginationBottomSafetyMargin
 
-                let visibleEnd = NSMaxRange(characterRange)
-                if visibleEnd < remainingText.length, visibleEnd > 0 {
-                    let source = remainingText.string as NSString
-                    var paragraphStart = 0
-                    var paragraphEnd = 0
-                    var contentsEnd = 0
-                    source.getParagraphStart(
-                        &paragraphStart,
-                        end: &paragraphEnd,
-                        contentsEnd: &contentsEnd,
-                        for: NSRange(location: visibleEnd - 1, length: 0)
-                    )
-                    if paragraphStart > characterRange.location, paragraphEnd > visibleEnd {
-                        characterRange.length = paragraphStart - characterRange.location
-                    }
-                }
-                return (
-                    Page(content: remainingText.attributedSubstring(from: characterRange)),
-                    NSMaxRange(characterRange)
-                )
+        let lines: [(start: Int, minY: CGFloat, maxY: CGFloat)] = autoreleasepool {
+            let textStorage = NSTextStorage(attributedString: attributedText)
+            let layoutManager = NSLayoutManager()
+            textStorage.addLayoutManager(layoutManager)
+            let container = NSTextContainer(size: NSSize(width: contentWidth, height: .greatestFiniteMagnitude))
+            container.lineFragmentPadding = 0
+            layoutManager.addTextContainer(container)
+            layoutManager.ensureLayout(for: container)
+            var result: [(start: Int, minY: CGFloat, maxY: CGFloat)] = []
+            layoutManager.enumerateLineFragments(forGlyphRange: layoutManager.glyphRange(for: container)) {
+                rect, _, _, glyphRange, _ in
+                let characters = layoutManager.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
+                result.append((characters.location, rect.minY, rect.maxY))
             }
-            guard let next else { break }
-            result.append(next.page)
-            consumedCharacters += next.consumed
+            return result
         }
-        return result.isEmpty ? [Page(content: attributedText)] : result
+        guard !lines.isEmpty else { return [Page(content: attributedText)] }
+
+        let source = attributedText.string as NSString
+        var pageStarts = [0]
+        var index = 1
+        while index < lines.count {
+            let first = pageStarts[pageStarts.count - 1]
+            guard lines[index].maxY - lines[first].minY > pageHeight else {
+                index += 1
+                continue
+            }
+            var next = index
+            let paragraph = source.paragraphRange(for: NSRange(location: lines[index].start, length: 0))
+            if paragraph.location > lines[first].start {
+                while next > first + 1, lines[next].start > paragraph.location { next -= 1 }
+            }
+            pageStarts.append(next)
+            index = next + 1
+        }
+
+        var pages: [Page] = []
+        for (position, lineIndex) in pageStarts.enumerated() {
+            let start = lines[lineIndex].start
+            let end = position + 1 < pageStarts.count ? lines[pageStarts[position + 1]].start : attributedText.length
+            guard end > start else { continue }
+            let range = NSRange(location: start, length: end - start)
+            if let previous = pages.last,
+               source.substring(with: range).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let merged = NSMutableAttributedString(attributedString: previous.content)
+                merged.append(attributedText.attributedSubstring(from: range))
+                pages[pages.count - 1] = Page(content: merged)
+            } else {
+                pages.append(Page(content: attributedText.attributedSubstring(from: range)))
+            }
+        }
+        return pages.isEmpty ? [Page(content: attributedText)] : pages
     }
 
     nonisolated static func pdfData(
