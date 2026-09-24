@@ -2035,6 +2035,58 @@ final class HHVacancySberTests: XCTestCase {
         try FavoriteVacanciesPDFExporter.validatePDF(data: data, expectedPages: pages.count)
     }
 
+    func testPDFPaginationKeepsParagraphsTogetherAndEveryPageFitsWhenDrawnAlone() throws {
+        let words = (0..<60).map { "слово\($0)" }.joined(separator: " ")
+        let source = (0..<120).map { "Абзац \($0). \(words)\n" }.joined()
+        let style = NSMutableParagraphStyle()
+        style.paragraphSpacing = 6
+        let attributed = NSAttributedString(string: source, attributes: [
+            .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.black, .paragraphStyle: style
+        ])
+
+        let pages = FavoriteVacanciesPDFExporter.pages(for: attributed)
+
+        XCTAssertGreaterThan(pages.count, 3)
+        XCTAssertEqual(pages.map(\.content.string).joined(), source)
+        let text = source as NSString
+        var offset = 0
+        var previousStart = 0
+        let drawableHeight = VacancyPDFDefaults.paperSize.height - VacancyPDFDefaults.verticalMargin * 2
+        let width = VacancyPDFDefaults.paperSize.width - VacancyPDFDefaults.horizontalMargin * 2
+        for (index, page) in pages.enumerated() {
+            if index > 0 {
+                let paragraph = text.paragraphRange(for: NSRange(location: offset, length: 0))
+                // A page starts a paragraph unless that paragraph is longer than a page.
+                XCTAssertTrue(paragraph.location == offset || paragraph.location <= previousStart,
+                              "Page \(index + 1) splits a paragraph that fits on one page")
+            }
+            let height = page.content.boundingRect(
+                with: NSSize(width: width, height: .greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading]
+            ).height
+            XCTAssertLessThanOrEqual(height, drawableHeight, "Page \(index + 1) would be clipped")
+            previousStart = offset
+            offset += page.content.length
+        }
+        let data = try FavoriteVacanciesPDFExporter.pdfData(for: pages)
+        try FavoriteVacanciesPDFExporter.validatePDF(data: data, expectedPages: pages.count)
+    }
+
+    func testPDFPaginationDoesNotEmitBlankPagesForWhitespaceTail() throws {
+        let source = "Текст вакансии\n" + String(repeating: "\n", count: 400)
+        let attributed = NSAttributedString(
+            string: source,
+            attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.black]
+        )
+
+        let pages = FavoriteVacanciesPDFExporter.pages(for: attributed)
+
+        XCTAssertEqual(pages.map(\.content.string).joined(), source)
+        XCTAssertTrue(pages.allSatisfy { !$0.content.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+        let data = try FavoriteVacanciesPDFExporter.pdfData(for: pages)
+        try FavoriteVacanciesPDFExporter.validatePDF(data: data, expectedPages: pages.count)
+    }
+
     @MainActor
     func testPDFSnapshotImportsHTMLOnMainActorForBackgroundRendering() async throws {
         let snapshot = PDFVacancySnapshot(value: makePDFVacancy(id: "main-import"))

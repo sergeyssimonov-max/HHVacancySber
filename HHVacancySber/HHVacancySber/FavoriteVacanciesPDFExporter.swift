@@ -1287,59 +1287,68 @@ final class FavoriteVacanciesPDFExporter: FavoriteVacanciesPDFExporting {
         }
     }
 
+    /// Lays the whole document out once, in a single container of unbounded height, and
+    /// cuts pages at line boundaries by vertical position: linear in the document length.
+    /// A paragraph that starts on a page and would cross its end moves to the next page;
+    /// a whitespace-only tail joins the previous page instead of becoming a blank page.
     nonisolated static func pages(for attributedText: NSAttributedString) -> [Page] {
-        let contentSize = NSSize(
-            width: VacancyPDFDefaults.paperSize.width - VacancyPDFDefaults.horizontalMargin * 2,
-            height: VacancyPDFDefaults.paperSize.height - VacancyPDFDefaults.verticalMargin * 2
-                - VacancyPDFDefaults.paginationBottomSafetyMargin
-        )
-        var result: [Page] = []
-        var consumedCharacters = 0
-        while consumedCharacters < attributedText.length {
-            let next: (page: Page, consumed: Int)? = autoreleasepool {
-                let remainingRange = NSRange(
-                    location: consumedCharacters,
-                    length: attributedText.length - consumedCharacters
-                )
-                let remainingText = attributedText.attributedSubstring(from: remainingRange)
-                let textStorage = NSTextStorage(attributedString: remainingText)
-                let layoutManager = NSLayoutManager()
-                textStorage.addLayoutManager(layoutManager)
-                let container = NSTextContainer(size: contentSize)
-                container.lineFragmentPadding = 0
-                layoutManager.addTextContainer(container)
-                layoutManager.ensureLayout(for: container)
-                let glyphRange = layoutManager.glyphRange(for: container)
-                guard glyphRange.length > 0 else { return nil }
-                var characterRange = layoutManager.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
-                guard characterRange.length > 0 else { return nil }
+        guard attributedText.length > 0 else { return [Page(content: attributedText)] }
+        let contentWidth = VacancyPDFDefaults.paperSize.width - VacancyPDFDefaults.horizontalMargin * 2
+        let pageHeight = VacancyPDFDefaults.paperSize.height - VacancyPDFDefaults.verticalMargin * 2
+            - VacancyPDFDefaults.paginationBottomSafetyMargin
 
-                let visibleEnd = NSMaxRange(characterRange)
-                if visibleEnd < remainingText.length, visibleEnd > 0 {
-                    let source = remainingText.string as NSString
-                    var paragraphStart = 0
-                    var paragraphEnd = 0
-                    var contentsEnd = 0
-                    source.getParagraphStart(
-                        &paragraphStart,
-                        end: &paragraphEnd,
-                        contentsEnd: &contentsEnd,
-                        for: NSRange(location: visibleEnd - 1, length: 0)
-                    )
-                    if paragraphStart > characterRange.location, paragraphEnd > visibleEnd {
-                        characterRange.length = paragraphStart - characterRange.location
-                    }
-                }
-                return (
-                    Page(content: remainingText.attributedSubstring(from: characterRange)),
-                    NSMaxRange(characterRange)
-                )
+        let lines: [(start: Int, minY: CGFloat, maxY: CGFloat)] = autoreleasepool {
+            let textStorage = NSTextStorage(attributedString: attributedText)
+            let layoutManager = NSLayoutManager()
+            textStorage.addLayoutManager(layoutManager)
+            let container = NSTextContainer(size: NSSize(width: contentWidth, height: .greatestFiniteMagnitude))
+            container.lineFragmentPadding = 0
+            layoutManager.addTextContainer(container)
+            layoutManager.ensureLayout(for: container)
+            var result: [(start: Int, minY: CGFloat, maxY: CGFloat)] = []
+            layoutManager.enumerateLineFragments(forGlyphRange: layoutManager.glyphRange(for: container)) {
+                rect, _, _, glyphRange, _ in
+                let characters = layoutManager.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
+                result.append((characters.location, rect.minY, rect.maxY))
             }
-            guard let next else { break }
-            result.append(next.page)
-            consumedCharacters += next.consumed
+            return result
         }
-        return result.isEmpty ? [Page(content: attributedText)] : result
+        guard !lines.isEmpty else { return [Page(content: attributedText)] }
+
+        let source = attributedText.string as NSString
+        var pageStarts = [0]
+        var index = 1
+        while index < lines.count {
+            let first = pageStarts[pageStarts.count - 1]
+            guard lines[index].maxY - lines[first].minY > pageHeight else {
+                index += 1
+                continue
+            }
+            var next = index
+            let paragraph = source.paragraphRange(for: NSRange(location: lines[index].start, length: 0))
+            if paragraph.location > lines[first].start {
+                while next > first + 1, lines[next].start > paragraph.location { next -= 1 }
+            }
+            pageStarts.append(next)
+            index = next + 1
+        }
+
+        var pages: [Page] = []
+        for (position, lineIndex) in pageStarts.enumerated() {
+            let start = lines[lineIndex].start
+            let end = position + 1 < pageStarts.count ? lines[pageStarts[position + 1]].start : attributedText.length
+            guard end > start else { continue }
+            let range = NSRange(location: start, length: end - start)
+            if let previous = pages.last,
+               source.substring(with: range).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let merged = NSMutableAttributedString(attributedString: previous.content)
+                merged.append(attributedText.attributedSubstring(from: range))
+                pages[pages.count - 1] = Page(content: merged)
+            } else {
+                pages.append(Page(content: attributedText.attributedSubstring(from: range)))
+            }
+        }
+        return pages.isEmpty ? [Page(content: attributedText)] : pages
     }
 
     nonisolated static func pdfData(
