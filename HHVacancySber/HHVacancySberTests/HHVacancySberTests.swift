@@ -819,62 +819,73 @@ final class HHVacancySberTests: XCTestCase {
         let original = directory.appendingPathComponent(name)
         let originalData = Data("existing user file".utf8)
         try originalData.write(to: original)
-        let exporter = FavoriteVacanciesPDFExporter(
-            chooseDirectory: { directory }, confirmReplacement: { _ in false }, now: { date }
-        )
+        let exporter = FavoriteVacanciesPDFExporter(chooseDirectory: { directory }, now: { date })
         let outcome = try await exporter.export(vacancies: [makePDFVacancy(id: "suffix")]) { _ in }
-        guard case .exportedWithCleanupWarning = outcome else {
-            return XCTFail("Expected a new suffixed export without a replacement prompt")
-        }
+        XCTAssertEqual(outcome, .exported(fileCount: 1, pageCount: 1))
         XCTAssertEqual(try Data(contentsOf: original), originalData)
         let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "pdf" && $0.lastPathComponent != name }
         XCTAssertEqual(files.count, 1)
         XCTAssertTrue(try XCTUnwrap(files.first).lastPathComponent.hasSuffix("_2.pdf"))
         XCTAssertNotNil(PDFDocument(url: try XCTUnwrap(files.first)))
+        // No hidden staging, backup or recovery directories are left next to the PDFs.
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).count, 2)
     }
 
-    func testPDFSuffixPlanHandlesOccupiedNamesDuplicatesAndUTF8Limit() async throws {
+    func testPDFWriterUsesFreeSuffixesForOccupiedAndDuplicateNamesWithinUTF8Limit() throws {
         let directory = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let worker = PDFExportWorker(fileManager: PDFFileManager(.default))
         try Data("keep".utf8).write(to: directory.appendingPathComponent("report.pdf"))
         try Data("keep too".utf8).write(to: directory.appendingPathComponent("report_2.pdf"))
-        let plan = try await worker.availableCollisionPlan(names: ["report.pdf", "report.pdf"], directory: directory)
-        XCTAssertEqual(plan.authorizations.map { $0.destination.lastPathComponent }, ["report_3.pdf", "report_4.pdf"])
-        XCTAssertTrue(plan.authorizations.allSatisfy { $0.expectedState == .absent })
+        let written = try PDFNewFileWriter.write(
+            [Data("a".utf8), Data("b".utf8)], names: ["report.pdf", "report.pdf"], in: directory
+        )
+        XCTAssertEqual(written.map(\.lastPathComponent), ["report_3.pdf", "report_4.pdf"])
+        XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent("report.pdf")), Data("keep".utf8))
+        XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent("report_2.pdf")), Data("keep too".utf8))
+        XCTAssertEqual(try Data(contentsOf: written[1]), Data("b".utf8))
+
         let longName = PDFFileNameBuilder.fileName(base: String(repeating: "ёж🙂/", count: 300), fallback: "vacancy")
-        let longPlan = try await worker.availableCollisionPlan(names: [longName, longName], directory: directory)
-        let names = longPlan.authorizations.map { $0.destination.lastPathComponent }
+        let long = try PDFNewFileWriter.write([Data("1".utf8), Data("2".utf8)], names: [longName, longName], in: directory)
+        let names = long.map(\.lastPathComponent)
         XCTAssertEqual(Set(names).count, 2)
         XCTAssertTrue(names.allSatisfy { $0.utf8.count <= 240 && !$0.contains("/") })
         XCTAssertTrue(names[1].hasSuffix("_2.pdf"))
-        do {
-            _ = try await worker.availableCollisionPlan(names: ["report.pdf"], directory: directory, maximumCandidates: 2)
-            XCTFail("Expected explicit name exhaustion")
-        } catch FavoriteVacanciesPDFExporter.ExportError.noAvailableFileName {} catch { XCTFail("Unexpected error: \(error)") }
+
+        XCTAssertThrowsError(try PDFNewFileWriter.write(
+            [Data()], names: ["report.pdf"], in: directory, maximumCandidates: 2
+        )) { error in
+            guard case FavoriteVacanciesPDFExporter.ExportError.noAvailableFileName = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
     }
 
-    func testPDFSuffixSelectionCancellationAndLateCollisionPreserveExistingFile() async throws {
+    func testPDFWriterRemovesItsFilesOnFailureOrCancellationAndKeepsExistingOnes() async throws {
         let directory = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let worker = PDFExportWorker(fileManager: PDFFileManager(.default))
-        let task = Task {
-            withUnsafeCurrentTask { $0?.cancel() }
-            return try await worker.availableCollisionPlan(names: ["cancel.pdf"], directory: directory)
+        let existing = directory.appendingPathComponent("part-2.pdf")
+        try Data("user file".utf8).write(to: existing)
+
+        XCTAssertThrowsError(try PDFNewFileWriter.write(
+            [Data("1".utf8), Data("2".utf8)], names: ["part-1.pdf", "part-2.pdf"], in: directory,
+            beforeEachFile: { index in if index == 1 { throw CocoaError(.fileWriteUnknown) } }
+        ))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), ["part-2.pdf"])
+
+        let cancelled = Task {
+            // Cancelled while the second file is written: the check before the third file stops the
+            // batch and both files already written by this call are removed.
+            try PDFNewFileWriter.write(
+                [Data("1".utf8), Data("3".utf8), Data("4".utf8)], names: ["part-1.pdf", "part-3.pdf", "part-4.pdf"],
+                in: directory,
+                beforeEachFile: { index in if index == 1 { withUnsafeCurrentTask { $0?.cancel() } } }
+            )
         }
-        do { _ = try await task.value; XCTFail("Expected cancellation") }
+        do { _ = try await cancelled.value; XCTFail("Expected cancellation") }
         catch is CancellationError {} catch { XCTFail("Unexpected error: \(error)") }
-        _ = try await worker.prepare(vacancies: .init(values: [makePDFVacancy(id: "race")]), progress: { _ in })
-        let plan = try await worker.availableCollisionPlan(names: ["race.pdf"], directory: directory)
-        let destination = directory.appendingPathComponent("race.pdf")
-        let data = Data("appeared after selection".utf8)
-        try data.write(to: destination)
-        do {
-            _ = try await worker.publish(names: ["race.pdf"], directory: directory, authorizations: plan.authorizations)
-            XCTFail("Must not overwrite a late arrival")
-        } catch {}
-        XCTAssertEqual(try Data(contentsOf: destination), data)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), ["part-2.pdf"])
+        XCTAssertEqual(try Data(contentsOf: existing), Data("user file".utf8))
     }
 
     func testRateLimitWaitPreventsQueuedRequestsFromOvertakingRetry() async throws {
@@ -1947,7 +1958,6 @@ final class HHVacancySberTests: XCTestCase {
         var progressWasOnMainThread = true
         let exporter = FavoriteVacanciesPDFExporter(
             chooseDirectory: { directory },
-            confirmReplacement: { _ in true },
             now: { fixedDate }
         )
 
@@ -1956,11 +1966,7 @@ final class HHVacancySberTests: XCTestCase {
             progressValues.append(progress)
         }
 
-        guard case .exportedWithCleanupWarning(let fileCount, let pageCount, _) = outcome else {
-            return XCTFail("Expected a completed export")
-        }
-        XCTAssertEqual(fileCount, 2)
-        XCTAssertEqual(pageCount, 101)
+        XCTAssertEqual(outcome, .exported(fileCount: 2, pageCount: 101))
         XCTAssertEqual(progressValues.first, .init(completedVacancies: 1, totalVacancies: 101))
         XCTAssertEqual(progressValues.last, .init(completedVacancies: 101, totalVacancies: 101))
         XCTAssertTrue(progressValues.allSatisfy { $0.totalVacancies == 101 })
@@ -1975,6 +1981,7 @@ final class HHVacancySberTests: XCTestCase {
             includingPropertiesForKeys: nil
         ).filter { $0.pathExtension == "pdf" }.sorted { $0.lastPathComponent < $1.lastPathComponent }
         XCTAssertEqual(pdfs.count, 2)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).count, 2, "Only the PDFs are written")
         try FavoriteVacanciesPDFExporter.validatePDF(at: pdfs[0], expectedPages: 100)
         try FavoriteVacanciesPDFExporter.validatePDF(at: pdfs[1], expectedPages: 1)
         let documents = try pdfs.map { try XCTUnwrap(PDFDocument(url: $0)) }
@@ -2000,7 +2007,6 @@ final class HHVacancySberTests: XCTestCase {
         var selectedDirectory: URL?
         let exporter = FavoriteVacanciesPDFExporter(
             chooseDirectory: { selectedDirectory },
-            confirmReplacement: { _ in true },
             now: { Date(timeIntervalSince1970: 1_788_400_000) }
         )
         let vacancy = makePDFVacancy(id: "cancel-retry")
@@ -2010,11 +2016,7 @@ final class HHVacancySberTests: XCTestCase {
 
         selectedDirectory = directory
         let completed = try await exporter.export(vacancies: [vacancy]) { _ in }
-        guard case .exportedWithCleanupWarning(let files, let pages, _) = completed else {
-            return XCTFail("Expected the next export to complete")
-        }
-        XCTAssertEqual(files, 1)
-        XCTAssertEqual(pages, 1)
+        XCTAssertEqual(completed, .exported(fileCount: 1, pageCount: 1))
     }
 
     func testPDFPaginationPreservesOversizedUnicodeContentAndRendersEveryPage() throws {
@@ -2090,7 +2092,7 @@ final class HHVacancySberTests: XCTestCase {
         let directory = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let destination = directory.appendingPathComponent("personal.pdf")
-        let worker = PDFExportWorker(fileManager: PDFFileManager(.default))
+        let worker = PDFExportWorker()
 
         try await worker.exportPersonal(
             vacancy: PDFVacancySnapshot(value: makePDFVacancy(id: "personal")),
@@ -2105,7 +2107,7 @@ final class HHVacancySberTests: XCTestCase {
         let directory = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let vacancy = makePDFVacancy(id: "last-page-cancel")
-        let worker = PDFExportWorker(fileManager: PDFFileManager(.default))
+        let worker = PDFExportWorker()
         let originalURL = directory.appendingPathComponent("original.pdf")
         try await worker.exportPersonal(vacancy: .init(value: makePDFVacancy(id: "original")), destination: originalURL)
         let original = try Data(contentsOf: originalURL)
@@ -2152,7 +2154,7 @@ final class HHVacancySberTests: XCTestCase {
             details: .init(id: summary.id, name: summary.name, employer: nil, area: nil,
                 salary: nil, alternateURL: nil, description: nil),
             location: .subject(id: "1", name: "Москва", cityID: "1", cityName: "Москва"))
-        let worker = PDFExportWorker(fileManager: PDFFileManager(.default))
+        let worker = PDFExportWorker()
         let personal = directory.appendingPathComponent("personal.pdf")
         try await worker.exportPersonal(vacancy: .init(value: value), destination: personal)
         let exporter = FavoriteVacanciesPDFExporter(chooseDirectory: { directory },
@@ -2207,99 +2209,6 @@ final class HHVacancySberTests: XCTestCase {
         for absent in ["SummaryDepartment", "2026-09-01T10:00:00Z", "123 456"] {
             XCTAssertFalse(text.contains(absent))
         }
-    }
-
-    @MainActor
-    func testPDFPublicationFailureAndCancellationRestoreOriginalsAndRetainRecovery() async throws {
-        for cancel in [false, true] {
-            let directory = temporaryDirectory()
-            defer { try? FileManager.default.removeItem(at: directory) }
-            let names = ["part-1.pdf", "part-2.pdf"]
-            let oldPages = FavoriteVacanciesPDFExporter.pages(for: VacancyPDFFormatter.attributedDocument(for: makePDFVacancy(id: "original")))
-            let original = try FavoriteVacanciesPDFExporter.pdfData(for: oldPages)
-            for name in names { try original.write(to: directory.appendingPathComponent(name), options: .atomic) }
-            let worker = PDFExportWorker(fileManager: PDFFileManager(.default), beforePublishingPart: { index in
-                guard index == 1 else { return }
-                if cancel { withUnsafeCurrentTask { $0?.cancel() } }
-                else { throw CocoaError(.fileWriteUnknown) }
-            })
-            _ = try await worker.prepare(vacancies: .init(values: (0..<101).map { makePDFVacancy(id: "replacement-\($0)") }), progress: { _ in })
-            let plan = try await worker.collisionPlan(names: names, directory: directory)
-            let task = Task { try await worker.publish(names: names, directory: directory, authorizations: plan.authorizations) }
-            do {
-                _ = try await task.value
-                XCTFail("Expected interrupted publication")
-            } catch let error as PDFTransactionRecoveryError {
-                XCTAssertEqual(error.originalError is CancellationError, cancel)
-                XCTAssertTrue(error.unrestoredDestinations.isEmpty)
-                XCTAssertTrue(error.preservedBackupURLs.isEmpty)
-                XCTAssertEqual(error.preservedPublishedOutputURLs.count, 1)
-                let recovery = try XCTUnwrap(error.recoveryDirectory.url)
-                XCTAssertTrue(FileManager.default.fileExists(atPath: recovery.appendingPathComponent(".cleanup_forbidden").path))
-                let retained = try XCTUnwrap(error.preservedPublishedOutputURLs.first)
-                let pdf = try XCTUnwrap(PDFDocument(url: retained))
-                XCTAssertEqual(pdf.pageCount, 100)
-                XCTAssertTrue(pdf.string?.contains("replacement-0") == true)
-            }
-            for name in names {
-                let destination = directory.appendingPathComponent(name)
-                XCTAssertEqual(try Data(contentsOf: destination), original)
-                XCTAssertEqual(try XCTUnwrap(PDFDocument(url: destination)).pageCount, 1)
-            }
-        }
-    }
-
-    @MainActor
-    func testPDFStagedValidationFailureLeavesOriginalUntouched() async throws {
-        let directory = temporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let destination = directory.appendingPathComponent("original.pdf")
-        let original = try FavoriteVacanciesPDFExporter.pdfData(for: FavoriteVacanciesPDFExporter.pages(
-            for: VacancyPDFFormatter.attributedDocument(for: makePDFVacancy(id: "original"))))
-        try original.write(to: destination, options: .atomic)
-        let worker = PDFExportWorker(fileManager: PDFFileManager(.default), validateStagedPart: { _, _ in
-            throw CocoaError(.fileReadCorruptFile)
-        })
-        _ = try await worker.prepare(vacancies: .init(values: [makePDFVacancy(id: "replacement")]), progress: { _ in })
-        let plan = try await worker.collisionPlan(names: [destination.lastPathComponent], directory: directory)
-        do {
-            _ = try await worker.publish(names: [destination.lastPathComponent], directory: directory, authorizations: plan.authorizations)
-            XCTFail("Invalid staged data must not be published")
-        } catch let error as PDFTransactionRecoveryError {
-            XCTAssertTrue(error.unrestoredDestinations.isEmpty)
-            XCTAssertTrue(error.preservedPublishedOutputURLs.isEmpty)
-        }
-        XCTAssertEqual(try Data(contentsOf: destination), original)
-    }
-
-    @MainActor
-    func testPDFCollisionRetainsBackupForNonDestructiveManualRecovery() async throws {
-        let directory = temporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let destination = directory.appendingPathComponent("original.pdf")
-        let original = try FavoriteVacanciesPDFExporter.pdfData(for: FavoriteVacanciesPDFExporter.pages(
-            for: VacancyPDFFormatter.attributedDocument(for: makePDFVacancy(id: "original"))))
-        try original.write(to: destination, options: .atomic)
-        let otherWriter = Data("Concurrent user document".utf8)
-        let worker = PDFExportWorker(fileManager: PDFFileManager(.default), beforePublishingPart: { _ in
-            try otherWriter.write(to: destination, options: .atomic)
-        })
-        _ = try await worker.prepare(vacancies: .init(values: [makePDFVacancy(id: "replacement")]), progress: { _ in })
-        let plan = try await worker.collisionPlan(names: [destination.lastPathComponent], directory: directory)
-        do {
-            _ = try await worker.publish(names: [destination.lastPathComponent], directory: directory, authorizations: plan.authorizations)
-            XCTFail("Concurrent destination must not be overwritten")
-        } catch let error as PDFTransactionRecoveryError {
-            XCTAssertEqual(error.unrestoredDestinations, [destination])
-            let backup = try XCTUnwrap(error.preservedBackupURLs.first)
-            XCTAssertEqual(try Data(contentsOf: backup), original)
-            let recovered = directory.appendingPathComponent("recovered-copy.pdf")
-            try FileManager.default.copyItem(at: backup, to: recovered)
-            XCTAssertEqual(try Data(contentsOf: recovered), original)
-            XCTAssertEqual(try XCTUnwrap(PDFDocument(url: recovered)).pageCount, 1)
-            XCTAssertTrue(error.localizedDescription.contains(backup.path))
-        }
-        XCTAssertEqual(try Data(contentsOf: destination), otherWriter)
     }
 
     func testHTMLSanitizerIsSafeAndDeterministicUnderConcurrentUse() async {
@@ -2687,7 +2596,7 @@ final class HHVacancySberTests: XCTestCase {
         let url = directory.appendingPathComponent("report.pdf")
         let original = Data("original file must survive cancellation".utf8)
         try original.write(to: url)
-        let worker = PDFExportWorker(fileManager: PDFFileManager(.default))
+        let worker = PDFExportWorker()
         let report = statisticsFixture([statisticsVacancy(id: "retry", date: nil)])
         let cancelled = Task {
             withUnsafeCurrentTask { $0?.cancel() }
@@ -2946,7 +2855,7 @@ final class HHVacancySberTests: XCTestCase {
         let (model, client, _) = makeStatisticsExportModel(directory: directory)
         await model.search()
         let initialSearchRequests = await client.searchRequestCount
-        let worker = PDFExportWorker(fileManager: PDFFileManager(.default))
+        let worker = PDFExportWorker()
         let snapshot = PDFVacanciesSnapshot(values: (0..<100).map { makePDFVacancy(id: "joint-\($0)") })
         var completed = 0
         let preparation = Task {

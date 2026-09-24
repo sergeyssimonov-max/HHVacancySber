@@ -75,7 +75,7 @@ struct RuntimeBenchmarks {
             precondition(model.favorites.allSatisfy { $0.archiveCheckedAt != nil })
             result["detail_requests"] = await client.requests
         } else {
-            let worker = PDFExportWorker(fileManager: PDFFileManager(.default))
+            let worker = PDFExportWorker()
             var pages = 0
             var bytes = 0
             var resident: [Int] = []
@@ -116,10 +116,10 @@ struct RuntimeBenchmarks {
                 } else {
                     let prepared = try await worker.prepare(vacancies: .init(values: values), progress: { _ in })
                     let names = (0..<prepared.partCount).map { "part-\($0).pdf" }
-                    let plan = try await worker.collisionPlan(names: names, directory: directory)
-                    let published = try await worker.publish(names: names, directory: directory, authorizations: plan.authorizations)
+                    let written = try await worker.writePrepared(names: names, directory: directory)
                     pages = prepared.pageCount
-                    bytes = try published.destinations.reduce(0) { try $0 + Data(contentsOf: $1).count }
+                    bytes = try written.reduce(0) { try $0 + Data(contentsOf: $1).count }
+                    for url in written { try FileManager.default.removeItem(at: url) }
                 }
                 resident.append(residentKiB())
                 descriptors.append((0..<1024).filter { fcntl(Int32($0), F_GETFD) != -1 }.count)

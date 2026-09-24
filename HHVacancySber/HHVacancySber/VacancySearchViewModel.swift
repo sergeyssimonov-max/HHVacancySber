@@ -511,7 +511,7 @@ final class VacancySearchViewModel: ObservableObject {
         guard panel.runModal() == .OK, let destination = panel.url else { return false }
         do {
             let prepared = try await preparedForPDF(source)
-            let worker = PDFExportWorker(fileManager: PDFFileManager(.default))
+            let worker = PDFExportWorker()
             try await worker.exportPersonal(
                 vacancy: PDFVacancySnapshot(value: prepared),
                 destination: destination
@@ -542,8 +542,6 @@ final class VacancySearchViewModel: ObservableObject {
             switch outcome {
             case .cancelled: break
             case .exported(let files, let pages): statusMessage = "Сохранено PDF: \(files), страниц: \(pages)."
-            case .exportedWithCleanupWarning(let files, let pages, let directory):
-                statusMessage = "Сохранено PDF: \(files), страниц: \(pages). Служебный каталог: \(directory.path)."
             }
         } catch is CancellationError {
             statusMessage = "Сохранение избранного в PDF отменено."
@@ -585,7 +583,7 @@ final class VacancySearchViewModel: ObservableObject {
         let report = statisticsReportSnapshot()
         guard let destination = statisticsPDFDestination(report.fileName) else { return }
         do {
-            let worker = PDFExportWorker(fileManager: PDFFileManager(.default))
+            let worker = PDFExportWorker()
             try await worker.exportStatistics(report: report, destination: destination)
             statisticsPDFExportMessage = "Статистический отчёт сохранён: \(report.entries.count) вакансий."
         } catch is CancellationError {
