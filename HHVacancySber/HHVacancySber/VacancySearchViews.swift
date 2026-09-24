@@ -20,6 +20,9 @@ enum VacancySearchViews {
                 statusBar
                 Divider()
                 if let warning = viewModel.favoritesWarning { warningView(warning) }
+                if !viewModel.isShowingFavorites, let warning = viewModel.collectionWarning {
+                    warningView(warning).accessibilityIdentifier("collectionWarning")
+                }
                 content
             }
             .background(DeskPalette.content)

@@ -55,7 +55,7 @@ struct RuntimeBenchmarks {
                 areas: areas,
                 progress: { _ in }
             )
-            precondition(collected.count == count)
+            precondition(collected.isComplete && collected.vacancies.count == count)
             result["search_requests"] = await client.requests
         } else if mode == "archive" {
             let client = FixtureClient(mode: mode)

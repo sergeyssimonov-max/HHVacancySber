@@ -370,23 +370,108 @@ final class HHVacancySberTests: XCTestCase {
             ])),
             progress: { _ in }
         )
-        XCTAssertEqual(values.count, 2_001)
-        XCTAssertEqual(Set(values.map(\.id)).count, 2_001)
+        XCTAssertTrue(values.isComplete)
+        XCTAssertEqual(values.vacancies.count, 2_001)
+        XCTAssertEqual(Set(values.vacancies.map(\.id)).count, 2_001)
     }
 
-    func testCollectorRetriesThenRejectsIncompleteLeaf() async throws {
-        let service = VacancyCollectionService(client: MockAPIClient(mode: .mismatch))
+    func testCollectorRereadsShortLeafOnceThenKeepsPartialResultWithIssue() async throws {
+        let client = MockAPIClient(mode: .mismatch)
+        let result = try await VacancyCollectionService(client: client).collect(
+            employers: [.init(id: "3529", name: "СБЕР", comment: "test")],
+            areas: try AreaDirectoryIndex(root: Self.areaTree),
+            progress: { _ in }
+        )
+
+        let requestCount = await client.searchRequestCount
+        XCTAssertEqual(result.vacancies.map(\.id), ["only-one"])
+        XCTAssertEqual(result.issues, [.init(employerID: "3529", employerName: "СБЕР", expected: 2, actual: 1, failures: [])])
+        XCTAssertEqual(result.issues.first?.message, "СБЕР – ожидалось 2, получено 1")
+        XCTAssertEqual(requestCount, 2)
+    }
+
+    func testCollectorKeepsOtherEmployersWhenOneEmployerFails() async throws {
+        let client = EmployerScriptedClient(behaviors: ["1": .vacancies(3), "2": .failure])
+        let result = try await VacancyCollectionService(client: client).collect(
+            employers: [.init(id: "1", name: "Первый", comment: "test"), .init(id: "2", name: "Второй", comment: "test")],
+            areas: try AreaDirectoryIndex(root: Self.areaTree),
+            progress: { _ in }
+        )
+
+        XCTAssertEqual(result.vacancies.count, 3)
+        XCTAssertFalse(result.isComplete)
+        XCTAssertEqual(result.issues.map(\.employerID), ["2"])
+        XCTAssertNil(result.issues.first?.expected)
+        XCTAssertEqual(result.issues.first?.failures.count, 1)
+    }
+
+    func testCollectorKeepsPagesReadBeforeLeafFailure() async throws {
+        let client = EmployerScriptedClient(behaviors: ["1": .failAfterFirstPage(150)])
+        let result = try await VacancyCollectionService(client: client).collect(
+            employers: [.init(id: "1", name: "Первый", comment: "test")],
+            areas: try AreaDirectoryIndex(root: Self.areaTree),
+            progress: { _ in }
+        )
+
+        XCTAssertEqual(result.vacancies.count, 100)
+        XCTAssertEqual(result.issues.first?.expected, 150)
+        XCTAssertEqual(result.issues.first?.actual, 100)
+        XCTAssertEqual(result.issues.first?.failures.count, 1)
+        XCTAssertTrue(result.issues.first?.failures.first?.contains("стр. 2") == true)
+    }
+
+    func testCollectorThrowsWhenNothingWasReadBecauseOfFailures() async throws {
+        let client = EmployerScriptedClient(behaviors: ["1": .failure, "2": .failure])
         do {
-            _ = try await service.collect(
-                employers: [.init(id: "3529", name: "СБЕР", comment: "test")],
+            _ = try await VacancyCollectionService(client: client).collect(
+                employers: [.init(id: "1", name: "Первый", comment: "test"), .init(id: "2", name: "Второй", comment: "test")],
                 areas: try AreaDirectoryIndex(root: Self.areaTree),
                 progress: { _ in }
             )
-            XCTFail("Expected completeness error")
-        } catch let error as VacancyCompletenessError {
-            XCTAssertEqual(error.expected, 2)
-            XCTAssertEqual(error.actual, 1)
+            XCTFail("Expected the transport failure")
+        } catch let error as URLError {
+            XCTAssertEqual(error.code, .timedOut)
         }
+    }
+
+    func testCollectorStopsOnAccessRestriction() async throws {
+        let client = EmployerScriptedClient(behaviors: ["1": .vacancies(3), "2": .forbidden, "3": .vacancies(1)])
+        do {
+            _ = try await VacancyCollectionService(client: client).collect(
+                employers: ["1", "2", "3"].map { .init(id: $0, name: "Работодатель \($0)", comment: "test") },
+                areas: try AreaDirectoryIndex(root: Self.areaTree),
+                progress: { _ in }
+            )
+            XCTFail("Expected forbidden")
+        } catch let error as HHAPIError {
+            XCTAssertEqual(error, .forbidden(requestID: nil))
+        }
+        let requested = await client.requestedEmployerIDs
+        XCTAssertFalse(requested.contains("3"))
+    }
+
+    @MainActor
+    func testPartialSearchShowsReceivedVacanciesWithWarningAndBypassesCache() async {
+        let client = EmployerScriptedClient(behaviors: ["1": .vacancies(2), "2": .failure])
+        let model = VacancySearchViewModel(
+            apiClient: client,
+            employerStore: TestEmployerStore(entries: [
+                .init(id: "1", name: "Первый", comment: "test"), .init(id: "2", name: "Второй", comment: "test")
+            ]),
+            areaStore: AreaDirectoryStore(fileURL: temporaryDirectory().appendingPathComponent("areas.json"))
+        )
+
+        await model.search()
+        XCTAssertEqual(model.results.count, 2)
+        XCTAssertNil(model.errorMessage)
+        XCTAssertTrue(model.collectionWarning?.hasPrefix("Выгрузка неполная. Второй – вакансии не получены") == true)
+        XCTAssertTrue(model.statusMessage?.hasPrefix("Готово с пропусками") == true)
+        XCTAssertTrue(model.statisticsReportSnapshot().sourceNote.contains("работодателей с пропусками: 1"))
+
+        let requestsAfterFirstSearch = await client.requestedEmployerIDs.count
+        await model.search()
+        let requestsAfterSecondSearch = await client.requestedEmployerIDs.count
+        XCTAssertGreaterThan(requestsAfterSecondSearch, requestsAfterFirstSearch, "An incomplete result must not be served from cache")
     }
 
     func testCollectorSearchRequestCountForOneLeaf() async throws {
@@ -398,7 +483,8 @@ final class HHVacancySberTests: XCTestCase {
         )
 
         let requestCount = await client.searchRequestCount
-        XCTAssertEqual(values.count, 1)
+        XCTAssertEqual(values.vacancies.count, 1)
+        XCTAssertTrue(values.isComplete)
         XCTAssertEqual(requestCount, 1)
     }
 
@@ -413,7 +499,8 @@ final class HHVacancySberTests: XCTestCase {
         )
 
         let requestCount = await client.searchRequestCount
-        XCTAssertEqual(values.count, 2_001)
+        XCTAssertEqual(values.vacancies.count, 2_001)
+        XCTAssertTrue(values.isComplete)
         XCTAssertEqual(requestCount, 22)
     }
 
@@ -541,7 +628,8 @@ final class HHVacancySberTests: XCTestCase {
         let client = HHAPIClient(
             accessTokenProvider: HHDefaultAccessTokenProvider(),
             requestGate: HHRequestGate(minimumDelayNanoseconds: 0),
-            maximumRateLimitRetries: 0
+            maximumRateLimitRetries: 0,
+            maximumTransientRetries: 0
         )
 
         requestCount += 1
@@ -570,7 +658,7 @@ final class HHVacancySberTests: XCTestCase {
         configuration.urlCache = nil
         let session = URLSession(configuration: configuration)
         defer { session.invalidateAndCancel() }
-        let client = HHAPIClient(session: session, requestGate: HHRequestGate(), maximumRateLimitRetries: 0)
+        let client = HHAPIClient(session: session, requestGate: HHRequestGate(), maximumRateLimitRetries: 0, maximumTransientRetries: 0)
 
         // One bounded production request; no paging, detail fetching or retry on errors.
         let response = try await client.searchVacancies(.init(employerID: "3529", perPage: 20))
@@ -902,12 +990,11 @@ final class HHVacancySberTests: XCTestCase {
         XCTAssertEqual(requests, 2)
     }
 
-    func testAPIDoesNotRetryNonRateLimitHTTPOrTransportFailures() async {
+    func testAPIDoesNotRetryClientHTTPFailures() async {
         let failures: [(Int, HHAPIError)] = [
             (400, .requestFailed(statusCode: 400, message: nil)),
             (404, .requestFailed(statusCode: 404, message: nil)),
-            (403, .forbidden(requestID: nil)),
-            (503, .requestFailed(statusCode: 503, message: nil))
+            (403, .forbidden(requestID: nil))
         ]
         for (status, expected) in failures {
             var requests = 0
@@ -918,7 +1005,26 @@ final class HHVacancySberTests: XCTestCase {
             await assertAPIError(client, equals: expected)
             XCTAssertEqual(requests, 1, "HTTP \(status) must finish without automatic retries")
         }
-        for code in [URLError.Code.timedOut, .networkConnectionLost] {
+        var requests = 0
+        let offline = makeHTTPClient { _ in
+            requests += 1
+            throw URLError(.notConnectedToInternet)
+        }
+        _ = try? await offline.searchVacancies(.init(employerID: "3529"))
+        XCTAssertEqual(requests, 1, "Offline is not a transient failure")
+    }
+
+    func testAPIRetriesTransientFailuresTwiceThenReportsThem() async {
+        for status in [500, 502, 503, 504] {
+            var requests = 0
+            let client = makeHTTPClient { _ in
+                requests += 1
+                return (status, [:], Data(#"{"errors":[]}"#.utf8))
+            }
+            await assertAPIError(client, equals: .requestFailed(statusCode: status, message: nil))
+            XCTAssertEqual(requests, 3, "HTTP \(status) gets two bounded retries")
+        }
+        for code in [URLError.Code.timedOut, .networkConnectionLost, .cannotConnectToHost] {
             var requests = 0
             let client = makeHTTPClient { _ in
                 requests += 1
@@ -932,8 +1038,44 @@ final class HHVacancySberTests: XCTestCase {
             } catch {
                 XCTFail("Unexpected error: \(error)")
             }
-            XCTAssertEqual(requests, 1, "Transport failure must finish without automatic retries")
+            XCTAssertEqual(requests, 3, "\(code) gets two bounded retries")
         }
+    }
+
+    func testAPITransientRetriesUseBackoffAndRecover() async throws {
+        let waits = RetryWaitRecorder()
+        var requests = 0
+        URLProtocolStub.handler = { _ in
+            requests += 1
+            if requests == 1 { throw URLError(.timedOut) }
+            if requests == 2 { return (502, [:], Data(#"{"errors":[]}"#.utf8)) }
+            return (200, [:], Data(#"{"items":[],"found":0,"pages":0,"page":0,"per_page":100}"#.utf8))
+        }
+        let client = HTTPClientFactory.make(retrySleep: { await waits.append($0) })
+        let response = try await client.searchVacancies(.init(employerID: "3529"))
+        let delays = await waits.values
+        XCTAssertEqual(response.found, 0)
+        XCTAssertEqual(requests, 3)
+        XCTAssertEqual(delays, [1_000_000_000, 2_000_000_000])
+    }
+
+    func testAPIServerRetryHonorsRetryAfterCeilingAndCanBeDisabled() async {
+        var requests = 0
+        var client = makeHTTPClient { _ in
+            requests += 1
+            return (503, ["Retry-After": "120"], Data(#"{"errors":[]}"#.utf8))
+        }
+        await assertAPIError(client, equals: .requestFailed(statusCode: 503, message: nil))
+        XCTAssertEqual(requests, 1, "A server delay above 60 seconds is not waited out")
+
+        requests = 0
+        URLProtocolStub.handler = { _ in
+            requests += 1
+            return (502, [:], Data(#"{"errors":[]}"#.utf8))
+        }
+        client = HTTPClientFactory.make(maximumTransientRetries: 0)
+        await assertAPIError(client, equals: .requestFailed(statusCode: 502, message: nil))
+        XCTAssertEqual(requests, 1)
     }
 
     func testRequestGateCancelsQueuedWaiterBeforeActiveRequestFinishes() async throws {
@@ -3051,6 +3193,43 @@ private struct CancelledAreaClient: HHVacancyAPIClient {
     }
 }
 
+private actor EmployerScriptedClient: HHVacancyAPIClient {
+    enum Behavior: Sendable { case vacancies(Int), failAfterFirstPage(Int), failure, forbidden }
+    let behaviors: [String: Behavior]
+    private(set) var requestedEmployerIDs: [String] = []
+    init(behaviors: [String: Behavior]) { self.behaviors = behaviors }
+    nonisolated func validateVacanciesAccess() throws {}
+    func areaTree() async throws -> HHAreaNode { .init(id: "113", name: "Россия", areas: [.init(id: "1", name: "Москва")]) }
+    func vacancyDictionaries() async throws -> HHVacancyDictionaries { .init(experience: [], workFormat: [], schedule: []) }
+    func vacancyDetails(id: String) async throws -> HHVacancyDetails {
+        XCTFail("Unexpected detail request"); throw HHAPIError.invalidResponse
+    }
+    func searchVacancies(_ request: HHVacancySearchRequest) async throws -> HHVacancySearchResponse {
+        requestedEmployerIDs.append(request.employerID)
+        let count: Int
+        switch behaviors[request.employerID] ?? .vacancies(0) {
+        case .failure: throw URLError(.timedOut)
+        case .forbidden: throw HHAPIError.forbidden(requestID: nil)
+        case .vacancies(let value): count = value
+        case .failAfterFirstPage(let value):
+            if request.page > 0 { throw HHAPIError.requestFailed(statusCode: 502, message: nil) }
+            count = value
+        }
+        let start = request.page * request.perPage
+        let end = min(start + request.perPage, count)
+        let items = start < end ? (start..<end).map { index in
+            HHVacancySummary(
+                id: "\(request.employerID)-\(index)", name: "Вакансия \(index)",
+                employer: .init(name: "Работодатель", id: request.employerID), salary: nil,
+                area: .init(id: "1", name: "Москва"), alternateURL: nil, url: nil, snippet: nil,
+                publishedAt: "2026-09-01T10:00:00+0300"
+            )
+        } : []
+        return .init(items: items, found: count, pages: Int(ceil(Double(count) / Double(request.perPage))),
+                     page: request.page, perPage: request.perPage)
+    }
+}
+
 private actor MockAPIClient: HHVacancyAPIClient {
     enum Mode: Sendable {
         case simple, partitioned, mismatch, failure, delayedArchive, archiveNotFound
@@ -3331,6 +3510,7 @@ private actor RetryWaitRecorder {
 private enum HTTPClientFactory {
     static func make(
         maximumRateLimitRetries: Int = 2,
+        maximumTransientRetries: Int = 2,
         requestGate: HHRequestGate? = nil,
         retrySleep: @escaping @Sendable (UInt64) async throws -> Void = { _ in }
     ) -> HHAPIClient {
@@ -3341,6 +3521,7 @@ private enum HTTPClientFactory {
             accessTokenProvider: FixedTokenProvider(),
             requestGate: requestGate ?? HHRequestGate(minimumDelayNanoseconds: 0),
             maximumRateLimitRetries: maximumRateLimitRetries,
+            maximumTransientRetries: maximumTransientRetries,
             retrySleep: retrySleep
         )
     }
@@ -3427,7 +3608,7 @@ private final class LiveCancellationRun {
         let session = URLSession(configuration: configuration, delegate: observer, delegateQueue: nil)
         self.observer = observer
         self.session = session
-        self.client = HHAPIClient(session: session, requestGate: HHRequestGate(minimumDelayNanoseconds: 1_000_000_000), maximumRateLimitRetries: 0)
+        self.client = HHAPIClient(session: session, requestGate: HHRequestGate(minimumDelayNanoseconds: 1_000_000_000), maximumRateLimitRetries: 0, maximumTransientRetries: 0)
     }
 
     private func begin(path: String) throws {

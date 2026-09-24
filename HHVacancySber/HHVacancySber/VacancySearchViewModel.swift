@@ -17,6 +17,7 @@ struct VacancyFilterOption: Identifiable, Equatable {
 private struct VacancySearchCache {
     let values: [VacancySearchResult]
     let updatedAt: Date
+    let issues: [VacancyCollectionIssue]
 }
 
 @MainActor
@@ -38,6 +39,8 @@ final class VacancySearchViewModel: ObservableObject {
     @Published private(set) var statusMessage: String?
     @Published private(set) var updatedAtMessage: String?
     @Published private(set) var favoritesWarning: String?
+    /// Employers read incompletely by the last successful search.
+    @Published private(set) var collectionWarning: String?
     @Published private(set) var hasSearched = false
     @Published private(set) var isCancellingSearch = false
     @Published private(set) var isCancellingFavoritesPDFExport = false
@@ -213,7 +216,7 @@ final class VacancySearchViewModel: ObservableObject {
         await loadPersistenceIfNeeded()
         guard !isLoading else { return }
         let now = currentDate()
-        if useCache, let cache, now.timeIntervalSince(cache.updatedAt) >= 0,
+        if useCache, let cache, cache.issues.isEmpty, now.timeIntervalSince(cache.updatedAt) >= 0,
            now.timeIntervalSince(cache.updatedAt) < Self.searchCacheTTL {
             resultsRevision += 1
             results = cache.values
@@ -235,11 +238,11 @@ final class VacancySearchViewModel: ObservableObject {
             let areaSnapshot = try await areaStore.load(using: apiClient)
             if let warning = areaSnapshot.warning { statusMessage = warning }
             let collector = VacancyCollectionService(client: apiClient, now: currentDate)
-            let summaries = try await collector.collect(employers: employers, areas: areaSnapshot.index) { [weak self] progress in
+            let collection = try await collector.collect(employers: employers, areas: areaSnapshot.index) { [weak self] progress in
                 self?.statusMessage = "\(progress.employerName): загружено \(progress.loadedCount), \(progress.partition)."
             }
             try Task.checkCancellation()
-            let values = orderedNewestFirst(summaries.map { summary -> VacancySearchResult in
+            let values = orderedNewestFirst(collection.vacancies.map { summary -> VacancySearchResult in
                 let fallback = HHVacancyDetails(
                     id: summary.id,
                     name: summary.name,
@@ -261,9 +264,14 @@ final class VacancySearchViewModel: ObservableObject {
             })
             resultsRevision += 1
             results = values
-            cache = VacancySearchCache(values: values, updatedAt: now)
+            cache = VacancySearchCache(values: values, updatedAt: now, issues: collection.issues)
             updatedAtMessage = timeMessage(now)
-            statusMessage = values.isEmpty ? "У выбранных работодателей нет открытых вакансий." : "Готово: \(values.count) уникальных вакансий."
+            collectionWarning = Self.makeCollectionWarning(for: collection.issues)
+            if collection.isComplete {
+                statusMessage = values.isEmpty ? "У выбранных работодателей нет открытых вакансий." : "Готово: \(values.count) уникальных вакансий."
+            } else {
+                statusMessage = "Готово с пропусками: \(values.count) уникальных вакансий, неполностью загружено работодателей: \(collection.issues.count)."
+            }
             normalizeFilters()
         } catch is CancellationError {
             statusMessage = "Поиск отменён."
@@ -271,6 +279,13 @@ final class VacancySearchViewModel: ObservableObject {
             errorMessage = error.localizedDescription
             statusMessage = "Поиск не завершён; сохранена предыдущая полная выборка."
         }
+    }
+
+    static func makeCollectionWarning(for issues: [VacancyCollectionIssue]) -> String? {
+        guard !issues.isEmpty else { return nil }
+        let shown = issues.prefix(3).map(\.message).joined(separator: ". ")
+        let rest = issues.count > 3 ? ". Еще работодателей с пропусками: \(issues.count - 3)" : ""
+        return "Выгрузка неполная. \(shown)\(rest). Показаны полученные вакансии, повторите обновление позже."
     }
 
     func toggleExplanation(for id: String) {
@@ -541,6 +556,9 @@ final class VacancySearchViewModel: ObservableObject {
         var note = "Отчёт по локальной выборке на момент нажатия кнопки. Дополнительная проверка HH.ru не выполнялась."
         if let cache {
             note += " Последняя загрузка общего списка: \(cache.updatedAt.formatted(date: .numeric, time: .shortened))."
+        }
+        if let cache, !cache.issues.isEmpty {
+            note += " Выгрузка общего списка неполная, работодателей с пропусками: \(cache.issues.count)."
         }
         if errorMessage != nil { note += " Последнее обновление не завершено; использованы сохранённые данные." }
         return VacancyStatisticsReport(
