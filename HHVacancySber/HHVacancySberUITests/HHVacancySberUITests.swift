@@ -266,8 +266,10 @@ final class HHVacancySberUITests: XCTestCase {
 
         let warning = app.descendants(matching: .any)["collectionWarning"]
         XCTAssertTrue(warning.waitForExistence(timeout: 5))
-        XCTAssertTrue(warning.label.contains("Выгрузка неполная"), warning.label)
-        XCTAssertTrue(warning.label.contains("СберРешения"), warning.label)
+        // macOS exposes static text in `value`; `label` may be empty.
+        let warningText = [warning.label, warning.value as? String ?? ""].joined(separator: " ")
+        XCTAssertTrue(warningText.contains("Выгрузка неполная"), warningText)
+        XCTAssertTrue(warningText.contains("СберРешения"), warningText)
         let attachment = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
         attachment.name = "Partial search warning"
         attachment.lifetime = .keepAlways

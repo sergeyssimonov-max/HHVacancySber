@@ -77,7 +77,8 @@ enum VacancySearchViews {
                 .accessibilityIdentifier("searchVacanciesButton")
             }
             .controlSize(.large)
-            .padding(.horizontal, 20)
+            // Same trailing inset as the status bar and cards, so the right-hand commands line up.
+            .padding(.horizontal, 28)
             .padding(.vertical, 10)
             .background(DeskPalette.toolbar)
         }
