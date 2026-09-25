@@ -888,6 +888,59 @@ final class HHVacancySberTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: existing), Data("user file".utf8))
     }
 
+    func testPDFWriterCancellationDuringLastFileRollsBackEntireBatch() async throws {
+        for count in [1, 3] {
+            let directory = temporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let existing = directory.appendingPathComponent("existing.pdf")
+            try Data("keep".utf8).write(to: existing)
+            let task = Task {
+                try PDFNewFileWriter.write(
+                    Array(repeating: Data("PDF".utf8), count: count),
+                    names: (0..<count).map { "part-\($0).pdf" }, in: directory,
+                    beforeEachFile: { index in
+                        if index == count - 1 { withUnsafeCurrentTask { $0?.cancel() } }
+                    }
+                )
+            }
+            do { _ = try await task.value; XCTFail("Expected cancellation") }
+            catch is CancellationError {} catch { XCTFail("Unexpected error: \(error)") }
+            XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), ["existing.pdf"])
+            XCTAssertEqual(try Data(contentsOf: existing), Data("keep".utf8))
+        }
+    }
+
+    func testPDFWriterRollbackPreservesReplacementFileAndSymlink() throws {
+        for useSymlink in [false, true] {
+            let directory = temporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let replacement = directory.appendingPathComponent("part-0.pdf")
+            let userFile = directory.appendingPathComponent("user.pdf")
+            let userData = Data("user document".utf8)
+            try userData.write(to: userFile)
+            XCTAssertThrowsError(try PDFNewFileWriter.write(
+                Array(repeating: Data("PDF".utf8), count: 3),
+                names: ["part-0.pdf", "part-1.pdf", "part-2.pdf"], in: directory,
+                beforeEachFile: { index in
+                    guard index == 2 else { return }
+                    try FileManager.default.removeItem(at: replacement)
+                    if useSymlink {
+                        try FileManager.default.createSymbolicLink(at: replacement, withDestinationURL: userFile)
+                    } else {
+                        try userData.write(to: replacement)
+                    }
+                    throw CocoaError(.fileWriteUnknown)
+                }
+            ))
+            XCTAssertEqual(try Data(contentsOf: replacement), userData)
+            XCTAssertEqual(try Data(contentsOf: userFile), userData)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent("part-1.pdf").path))
+            if useSymlink {
+                XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: replacement.path), userFile.path)
+            }
+        }
+    }
+
     func testRateLimitWaitPreventsQueuedRequestsFromOvertakingRetry() async throws {
         let entered = expectation(description: "Retry owns gate")
         let release = TestAsyncSignal()

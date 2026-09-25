@@ -77,8 +77,10 @@ enum VacancySearchViews {
                 .accessibilityIdentifier("searchVacanciesButton")
             }
             .controlSize(.large)
-            // Same trailing inset as the status bar and cards, so the right-hand commands line up.
-            .padding(.horizontal, 28)
+            // The native large bordered button has an 8-point trailing alignment inset.
+            // Compensate so its visible edge matches the PDF commands at 28 points.
+            .padding(.leading, 28)
+            .padding(.trailing, 20)
             .padding(.vertical, 10)
             .background(DeskPalette.toolbar)
         }
@@ -345,15 +347,21 @@ struct VacancyHTMLDescriptionView: NSViewRepresentable {
         context.coordinator.field = field
         view.loadHTMLString(VacancyHTMLDocument.make(from: html, field: field), baseURL: nil)
     }
-    // The async form matches WKNavigationDelegate on every SDK. The completion-handler
-    // form only nearly matched the Xcode 16 signature and was then never called.
+    // Keep the async delegate signature on both SDK generations. Xcode 15 imports
+    // this requirement as nonisolated; Xcode 16 adds main-actor isolation in WebKit.
     @MainActor
     final class Coordinator: NSObject, WKNavigationDelegate {
         var loaded: String?
         var field: VacancyField?
+        #if compiler(>=6.0)
         func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction) async -> WKNavigationActionPolicy {
             action.request.url?.scheme == "about" ? .allow : .cancel
         }
+        #else
+        nonisolated func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction) async -> WKNavigationActionPolicy {
+            action.request.url?.scheme == "about" ? .allow : .cancel
+        }
+        #endif
     }
 }
 
