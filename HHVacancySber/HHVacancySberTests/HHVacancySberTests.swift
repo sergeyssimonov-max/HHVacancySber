@@ -2316,6 +2316,28 @@ final class HHVacancySberTests: XCTestCase {
         }
     }
 
+    func testReadableHTMLTextSurvivesPoolDrainAndConcurrentConversion() async {
+        let cases = [
+            ("", ""),
+            ("<p>ёж &amp; Ω 🙂</p>", "ёж & Ω 🙂"),
+            ("<script>hidden()</script><style>body{}</style><p>Visible</p>", "Visible"),
+            ("<div>First<br>Second</div>", "First\nSecond"),
+            ("<ul><li>One</li><li>Two</li></ul>", "• One\n\n• Two"),
+            ("&lt;x&gt; &quot;quoted&quot; &#39;text&#39;", "<x> \"quoted\" 'text'")
+        ]
+        let results = await withTaskGroup(of: [String].self, returning: [[String]].self) { group in
+            for _ in 0..<100 {
+                group.addTask { cases.map { $0.0.readableHTMLText } }
+            }
+            var values: [[String]] = []
+            for await value in group { values.append(value) }
+            return values
+        }
+        XCTAssertEqual(results.count, 100)
+        // Compare after every conversion pool has drained and all tasks have finished.
+        for result in results { XCTAssertEqual(result, cases.map { $0.1 }) }
+    }
+
     func testHTMLSanitizerIsSafeAndDeterministicUnderConcurrentUse() async {
         let source = """
         <!-- secret --><div class="layout"><h2>Кириллица</h2><script>alert(1)</script>

@@ -75,6 +75,59 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertNotIn("osascript", script)
         self.assertIn("trap 'rm -rf \"$work\"' EXIT", script)
 
+    def test_packaging_builds_frozen_commit_and_publishes_matching_pair(self):
+        # Exercise the actual shell flow; stub only macOS packaging/build tools.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository = root / "repository"
+            scripts = repository / "scripts"
+            scripts.mkdir(parents=True)
+            shutil.copy(RELEASE_SCRIPT, scripts / "release.sh")
+            shutil.copy(REPOSITORY_ROOT / "scripts/publish_release.py", scripts / "publish_release.py")
+            (scripts / "verify_release_entitlements.py").write_text("print('{}')\n")
+            (repository / "source.txt").write_text("committed")
+            git = ["git", "-C", str(repository), "-c", "user.name=Test", "-c", "user.email=test@example.invalid"]
+            subprocess.run(git[:3] + ["init", "-q"], check=True)
+            subprocess.run(git + ["add", "."], check=True)
+            subprocess.run(git + ["commit", "-q", "-m", "fixture"], check=True)
+            binaries = root / "bin"
+            binaries.mkdir()
+            commands = {
+                "xcodebuild": '''#!/usr/bin/env python3
+import os, pathlib, plistlib, sys
+pathlib.Path(os.environ['ORIGINAL_CHECKOUT'], 'source.txt').write_text('edited during build')
+assert pathlib.Path('source.txt').read_text() == 'committed'
+derived = pathlib.Path(sys.argv[sys.argv.index('-derivedDataPath') + 1])
+app = derived / 'Build/Products/Release/СберВакансии.app/Contents'
+app.mkdir(parents=True)
+(app / 'Info.plist').write_bytes(plistlib.dumps({'CFBundleShortVersionString':'1.1','CFBundleVersion':'9'}))
+''',
+                "codesign": '#!/bin/sh\necho "flags=0x10000(runtime)"\n',
+                "ditto": '#!/bin/sh\ncp -R "$1" "$2"\n',
+                "hdiutil": '''#!/bin/bash
+if [[ "$1" == create ]]; then
+  printf 'verified fixture image' > "${@: -1}"
+fi
+''',
+            }
+            for name, content in commands.items():
+                executable = binaries / name
+                executable.write_text(content)
+                executable.chmod(0o755)
+            output = root / "output"
+            completed = run(scripts / "release.sh", "--output-dir", str(output), env={
+                "PATH": str(binaries) + os.pathsep + os.environ["PATH"],
+                "ORIGINAL_CHECKOUT": str(repository),
+                "TMPDIR": str(root),
+            })
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            image = output / "HHVacancySber_1.1_9_macos13_arm64.dmg"
+            self.assertEqual(image.read_bytes(), b"verified fixture image")
+            verification = subprocess.run(["shasum", "-a", "256", "-c", image.name + ".sha256"],
+                                          cwd=output, capture_output=True)
+            self.assertEqual(verification.returncode, 0, verification.stderr)
+            self.assertEqual(list(root.glob("hhvacancysber-release.*")), [])
+
 
 if __name__ == "__main__":
     unittest.main()

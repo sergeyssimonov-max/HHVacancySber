@@ -1,0 +1,130 @@
+{
+  "harness_sha256": "9a8a75ba8b9e4e36b1db5f54274f56014757cf48c87ecd27a8e92804e23ea558",
+  "production_before_sha256": "3ec16158f73a62bb9bc3d066d2c8f81eb6cf0334a98be15a8cdb75e575c7d90d",
+  "command": [
+    "enrichment-favorites",
+    "500"
+  ],
+  "samples": 5,
+  "permissions": "unrestricted",
+  "compiler": "swiftc -O via scripts/benchmarks/build.sh",
+  "models_before_sha256": "7a8b057de45419462d93390e060d7aab802d6ade5abe70fd4c29a758da871199",
+  "release_executable_before_bytes": 2233632,
+  "models_after_sha256": "6de2063ec4446c21c2a8e04b09feaad9af7902e013a6dd80e64011aea0723af6",
+  "base_commit": "04b3c1596ef1ebe40ae77d9186d6e33e34b909c1",
+  "os": "13.7.8",
+  "architecture": "arm64",
+  "release_executable_after_bytes": 2233632,
+  "before_binary_sha256": "23474ef8f998a176d9e5789f55aabc5a4e3b60a890e97e3b51140db07b69f6eb",
+  "after_binary_sha256": "02be81abfe161bc53ed23118a3f73dcae242896c2892cb6b5b788e36c04de8e4",
+  "acceptance": "RSS reduction >5% with disjoint sample ranges; CPU and wall regressions <5%; unchanged semantic checks; tests and strict Release pass.",
+  "semantic_comparisons": 1331,
+  "tests": {
+    "testsCount": "131",
+    "testsSkippedCount": "6"
+  },
+  "before": [
+    {
+      "cpu_seconds": 8.628568,
+      "detail_requests": 500,
+      "export_calls": 2,
+      "mode": "enrichment-favorites",
+      "peak_rss_bytes": 257654784,
+      "seconds": 8.679948874982074,
+      "vacancies": 500,
+      "sample": 1
+    },
+    {
+      "cpu_seconds": 8.618003,
+      "detail_requests": 500,
+      "export_calls": 2,
+      "mode": "enrichment-favorites",
+      "peak_rss_bytes": 257409024,
+      "seconds": 8.617761291679926,
+      "vacancies": 500,
+      "sample": 2
+    },
+    {
+      "cpu_seconds": 8.59961,
+      "detail_requests": 500,
+      "export_calls": 2,
+      "mode": "enrichment-favorites",
+      "peak_rss_bytes": 257556480,
+      "seconds": 8.596407749981154,
+      "vacancies": 500,
+      "sample": 3
+    },
+    {
+      "cpu_seconds": 8.599677,
+      "detail_requests": 500,
+      "export_calls": 2,
+      "mode": "enrichment-favorites",
+      "peak_rss_bytes": 259457024,
+      "seconds": 8.60139870835701,
+      "vacancies": 500,
+      "sample": 4
+    },
+    {
+      "cpu_seconds": 8.601189,
+      "detail_requests": 500,
+      "export_calls": 2,
+      "mode": "enrichment-favorites",
+      "peak_rss_bytes": 258457600,
+      "seconds": 8.60395962500479,
+      "vacancies": 500,
+      "sample": 5
+    }
+  ],
+  "after": [
+    {
+      "cpu_seconds": 8.617225,
+      "detail_requests": 500,
+      "export_calls": 2,
+      "mode": "enrichment-favorites",
+      "peak_rss_bytes": 123994112,
+      "seconds": 8.643657208303921,
+      "vacancies": 500,
+      "sample": 1
+    },
+    {
+      "cpu_seconds": 8.645011,
+      "detail_requests": 500,
+      "export_calls": 2,
+      "mode": "enrichment-favorites",
+      "peak_rss_bytes": 124813312,
+      "seconds": 8.687072124972474,
+      "vacancies": 500,
+      "sample": 2
+    },
+    {
+      "cpu_seconds": 8.634535,
+      "detail_requests": 500,
+      "export_calls": 2,
+      "mode": "enrichment-favorites",
+      "peak_rss_bytes": 124846080,
+      "seconds": 8.670477541629225,
+      "vacancies": 500,
+      "sample": 3
+    },
+    {
+      "cpu_seconds": 8.652047999999999,
+      "detail_requests": 500,
+      "export_calls": 2,
+      "mode": "enrichment-favorites",
+      "peak_rss_bytes": 124813312,
+      "seconds": 8.709355125029106,
+      "vacancies": 500,
+      "sample": 4
+    },
+    {
+      "cpu_seconds": 8.590229,
+      "detail_requests": 500,
+      "export_calls": 2,
+      "mode": "enrichment-favorites",
+      "peak_rss_bytes": 124125184,
+      "seconds": 8.622941375011578,
+      "vacancies": 500,
+      "sample": 5
+    }
+  ]
+}

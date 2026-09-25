@@ -50,7 +50,7 @@ Bundled-файл находится в `HHVacancySber/HHVacancySber/employers.js
 
 Канонический вектор новой зелёной пиктограммы — `HHVacancySber/Design/AppIcon.svg`. Скрипт `HHVacancySber/Scripts/render_icon.py` создаёт слоты 16–1024 через CairoSVG, `rsvg-convert`, macOS AppKit или Pillow и явно завершается ошибкой, если SVG-backend недоступен.
 
-DMG собирается из чистого commit командой `scripts/release.sh --output-dir <directory>`. Скрипт собирает Release с теми же строгими флагами, что и CI, проверяет подпись, hardened runtime и sandbox entitlements (`scripts/verify_release_entitlements.py`), кладет в образ приложение, ссылку на «Программы» и `README.txt` с исходным commit, пишет рядом `.sha256` и удаляет рабочий каталог. Существующий DMG с тем же именем не перезаписывается.
+DMG собирается из чистого commit командой `scripts/release.sh --output-dir <directory>`. Скрипт извлекает снимок этого commit во временный каталог, собирает Release с теми же строгими флагами, что и CI, проверяет подпись, hardened runtime и sandbox entitlements (`scripts/verify_release_entitlements.py`), кладет в образ приложение, ссылку на «Программы» и `README.txt` с исходным commit, пишет рядом `.sha256` и удаляет рабочий каталог. Публикация DMG и `.sha256` не перезаписывает существующие файлы, каталоги или ссылки; при ошибке второго файла убирается созданный этим запуском DMG.
 
 По умолчанию подпись ad hoc: на другом Mac Gatekeeper покажет предупреждение. Для распространения задайте `DEVELOPER_ID="Developer ID Application: … (TEAMID)"`, а для нотаризации еще `NOTARY_PROFILE` – имя профиля, сохраненного через `xcrun notarytool store-credentials`.
 

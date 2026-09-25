@@ -36,6 +36,11 @@ output_dir="$(cd "$output_dir" && pwd -P)"
 work="$(mktemp -d "${TMPDIR:-/tmp}/hhvacancysber-release.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
+# Build the recorded commit even if the working checkout is edited during the build.
+mkdir "$work/source"
+git archive "$commit" | tar -x -C "$work/source"
+cd "$work/source"
+
 # Same strict settings as the CI release-build job.
 xcodebuild -quiet \
   -project HHVacancySber/HHVacancySber.xcodeproj -scheme HHVacancySber \
@@ -61,7 +66,9 @@ plist="$app/Contents/Info.plist"
 version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")"
 build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist")"
 name="HHVacancySber_${version}_${build}_macos13_arm64.dmg"
-[[ ! -e "$output_dir/$name" ]] || fail "$output_dir/$name already exists"
+for existing in "$output_dir/$name" "$output_dir/$name.sha256"; do
+  [[ ! -e "$existing" && ! -L "$existing" ]] || fail "$existing already exists"
+done
 
 if [[ -n "${DEVELOPER_ID:-}" ]]; then
   signing="Сборка подписана Developer ID."
@@ -100,7 +107,4 @@ if [[ -n "${NOTARY_PROFILE:-}" ]]; then
 fi
 hdiutil verify -quiet "$work/$name"
 
-mv -n "$work/$name" "$output_dir/$name"
-if [[ -e "$work/$name" ]]; then fail "$output_dir/$name appeared during the build"; fi
-(cd "$output_dir" && shasum -a 256 "$name" > "$name.sha256")
-echo "$output_dir/$name"
+python3 scripts/publish_release.py "$work/$name" "$output_dir"

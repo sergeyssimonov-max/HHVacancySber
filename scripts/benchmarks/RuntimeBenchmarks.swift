@@ -42,8 +42,15 @@ struct RuntimeBenchmarks {
                 areaStore: AreaDirectoryStore(fileURL: directory.appendingPathComponent("areas.json")),
                 favoritesStore: InMemoryFavoriteVacancyStore(favorites: records), favoritePDFExporter: exporter)
             await model.loadPersistenceIfNeeded()
+            if mode == "enrichment-favorites" { model.displayMode = .favorites }
+            let expectedIDs = model.favorites.map(\.id)
             await model.exportFavoriteVacanciesPDF()
-            if mode == "enrichment-repeat" { await model.exportFavoriteVacanciesPDF() }
+            if mode == "enrichment-repeat" || mode == "enrichment-favorites" {
+                await model.exportFavoriteVacanciesPDF()
+                precondition(exporter.calls == 2 && exporter.lastIDs == expectedIDs)
+                let requestCount = await client.requests
+                precondition(requestCount == count)
+            }
             result["detail_requests"] = await client.requests
             result["export_calls"] = exporter.calls
         } else if mode == "search" {
@@ -196,8 +203,10 @@ private struct Employers: EmployerConfigurationStoring {
 
 @MainActor private final class ExportProbe: FavoriteVacanciesPDFExporting {
     var calls = 0
+    var lastIDs: [String] = []
     func export(vacancies: [VacancySearchResult], progress: @escaping @MainActor @Sendable (FavoritePDFExportProgress) -> Void) async throws -> FavoritePDFExportOutcome {
         calls += 1
+        lastIDs = vacancies.map(\.id)
         return .cancelled
     }
 }

@@ -9,6 +9,7 @@ bash scripts/benchmarks/build.sh "$benchmark_dir/benchmark"
 "$benchmark_dir/benchmark" enrichment-cancel 100
 "$benchmark_dir/benchmark" enrichment-limit 100
 "$benchmark_dir/benchmark" enrichment-repeat 100
+"$benchmark_dir/benchmark" enrichment-favorites 500
 "$benchmark_dir/benchmark" search 1000
 "$benchmark_dir/benchmark" archive 1000
 "$benchmark_dir/benchmark" pdf 10
@@ -19,7 +20,7 @@ bash scripts/benchmarks/build.sh "$benchmark_dir/benchmark"
 "$benchmark_dir/benchmark" soak 500
 ```
 
-Используйте положительное число вакансий. `stress` создаёт 1 200 HTML-абзацев на вакансию; остальные PDF-режимы — 12. `pdf` включает подготовку, валидацию и реальную transaction-публикацию. `statistics` включает atomic write, повторное открытие и проверку присутствия последнего входного ID. `soak` шесть раз заменяет один статистический PDF. `enrichment-*` проверяет подготовку ViewModel, а не рендер: exporter-spy фиксирует вызовы и возвращает отмену выбора каталога. В `enrichment-repeat` два последовательных экспорта. `search` прогоняет collector на локальной постраничной фикстуре; `archive` последовательно проверяет избранное через detail-фикстуру и дожидается сохранения. Живая сеть для этих режимов запрещена.
+Используйте положительное число вакансий. `stress` создаёт 1 200 HTML-абзацев на вакансию; остальные PDF-режимы — 12. `pdf` включает подготовку, валидацию и реальную transaction-публикацию. `statistics` включает atomic write, повторное открытие и проверку присутствия последнего входного ID. `soak` шесть раз заменяет один статистический PDF. `enrichment-*` проверяет подготовку ViewModel, а не рендер: exporter-spy фиксирует вызовы и возвращает отмену выбора каталога. В `enrichment-repeat` два последовательных экспорта. `enrichment-favorites` делает два экспорта из режима избранного; оба режима проверяют число экспортов, порядок и состав последнего снимка, а также отсутствие повторной загрузки details (ровно N запросов фикстуры на два экспорта). `search` прогоняет collector на локальной постраничной фикстуре; `archive` последовательно проверяет избранное через detail-фикстуру и дожидается сохранения. Живая сеть для этих режимов запрещена.
 
 Вывод — JSON: wall-clock, CPU user+system (`getrusage`), peak RSS в байтах (macOS), текущий RSS через `ps` в KiB, число открытых дескрипторов из первых 1 024, страницы и размер файлов. `resident_kib: -1` означает, что sandbox запретил `ps`; это не отрицательное потребление памяти. Проверка heartbeat main actor включает накладные расходы самого harness (в том числе PDFKit extraction и `ps`); это не измерение задержки отрисовки SwiftUI. В PDF-режимах параллельно выполняются 20 лёгких mock detail-операций. Более прикладной сценарий фильтры + details + PDF покрыт unit integration-тестом.
 
