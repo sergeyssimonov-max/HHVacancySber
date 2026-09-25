@@ -77,10 +77,8 @@ enum VacancySearchViews {
                 .accessibilityIdentifier("searchVacanciesButton")
             }
             .controlSize(.large)
-            // The native large bordered button has an 8-point trailing alignment inset.
-            // Compensate so its visible edge matches the PDF commands at 28 points.
-            .padding(.leading, 28)
-            .padding(.trailing, 20)
+            // Match the status bar and cards; native button insets vary by macOS version.
+            .padding(.horizontal, 28)
             .padding(.vertical, 10)
             .background(DeskPalette.toolbar)
         }
