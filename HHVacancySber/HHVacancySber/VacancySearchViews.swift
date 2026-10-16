@@ -20,6 +20,7 @@ enum VacancySearchViews {
                 statusBar
                 Divider()
                 if let warning = viewModel.favoritesWarning { warningView(warning) }
+                if !viewModel.isShowingFavorites, let warning = viewModel.snapshotWarning { warningView(warning) }
                 if !viewModel.isShowingFavorites, let warning = viewModel.collectionWarning {
                     warningView(warning)
                         .accessibilityElement(children: .combine)
@@ -296,10 +297,7 @@ private struct VacancyCard: View {
             }
         }
         .font(.caption)
-        .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(DeskPalette.toolbar)
-        .clipShape(RoundedRectangle(cornerRadius: 7))
     }
 }
 

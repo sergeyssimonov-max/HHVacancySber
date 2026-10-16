@@ -25,6 +25,7 @@
 		BA0000000000000000000014 /* employers.legacy-44.json in Resources */ = {isa = PBXBuildFile; fileRef = BA0000000000000000000004 /* employers.legacy-44.json */; };
 		BB0000000000000000000014 /* employers.legacy-45.json in Resources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000004 /* employers.legacy-45.json */; };
 		C90000000000000000000002 /* ApplicationSupportLocation.swift in Sources */ = {isa = PBXBuildFile; fileRef = C90000000000000000000001 /* ApplicationSupportLocation.swift */; };
+		CA0000000000000000000002 /* VacancySnapshotStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA0000000000000000000001 /* VacancySnapshotStore.swift */; };
 		A10000022FF9BA0000CF4705 /* VacancySearchViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012FF9BA0000CF4705 /* VacancySearchViewModel.swift */; };
 		A10000022FF9BA0000CF4707 /* VacancySearchViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012FF9BA0000CF4707 /* VacancySearchViews.swift */; };
 		A10000022FF9BA0000CF4709 /* FavoriteVacancyStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012FF9BA0000CF4709 /* FavoriteVacancyStore.swift */; };
@@ -71,6 +72,7 @@
 		BA0000000000000000000004 /* employers.legacy-44.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "employers.legacy-44.json"; sourceTree = "<group>"; };
 		BB0000000000000000000004 /* employers.legacy-45.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "employers.legacy-45.json"; sourceTree = "<group>"; };
 		C90000000000000000000001 /* ApplicationSupportLocation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApplicationSupportLocation.swift; sourceTree = "<group>"; };
+		CA0000000000000000000001 /* VacancySnapshotStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VacancySnapshotStore.swift; sourceTree = "<group>"; };
 		A10000012FF9BA0000CF4705 /* VacancySearchViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VacancySearchViewModel.swift; sourceTree = "<group>"; };
 		A10000012FF9BA0000CF4707 /* VacancySearchViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VacancySearchViews.swift; sourceTree = "<group>"; };
 		A10000012FF9BA0000CF4709 /* FavoriteVacancyStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FavoriteVacancyStore.swift; sourceTree = "<group>"; };
@@ -138,6 +140,7 @@
 				BA0000000000000000000004 /* employers.legacy-44.json */,
 				BB0000000000000000000004 /* employers.legacy-45.json */,
 				C90000000000000000000001 /* ApplicationSupportLocation.swift */,
+				CA0000000000000000000001 /* VacancySnapshotStore.swift */,
 				A10000012FF9BA0000CF4705 /* VacancySearchViewModel.swift */,
 				A10000012FF9BA0000CF4707 /* VacancySearchViews.swift */,
 				A10000012FF9BA0000CF4709 /* FavoriteVacancyStore.swift */,
@@ -317,6 +320,7 @@
 				B80000000000000000000012 /* AreaDirectoryStore.swift in Sources */,
 				B80000000000000000000013 /* VacancyCollectionService.swift in Sources */,
 				C90000000000000000000002 /* ApplicationSupportLocation.swift in Sources */,
+				CA0000000000000000000002 /* VacancySnapshotStore.swift in Sources */,
 				A10000022FF9BA0000CF4705 /* VacancySearchViewModel.swift in Sources */,
 				A10000022FF9BA0000CF4707 /* VacancySearchViews.swift in Sources */,
 				A10000022FF9BA0000CF4709 /* FavoriteVacancyStore.swift in Sources */,
@@ -485,7 +489,7 @@
 				CODE_SIGN_ENTITLEMENTS = HHVacancySber/HHVacancySber.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 9;
+				CURRENT_PROJECT_VERSION = 10;
 				DEVELOPMENT_ASSET_PATHS = "\"HHVacancySber/Preview Content\"";
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = NO;
@@ -514,7 +518,7 @@
 				CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 9;
+				CURRENT_PROJECT_VERSION = 10;
 				DEVELOPMENT_ASSET_PATHS = "\"HHVacancySber/Preview Content\"";
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;

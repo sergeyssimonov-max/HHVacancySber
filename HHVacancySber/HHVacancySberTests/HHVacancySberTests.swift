@@ -297,18 +297,147 @@ final class HHVacancySberTests: XCTestCase {
         XCTAssertNil(json["jointVenture"])
     }
 
-    func testPersistentStoresShareCanonicalApplicationSupportDirectory() {
-        let employerURL = EmployerConfigurationStore().fileURL
-        let areaURL = AreaDirectoryStore().fileURL
-        let favoritesURL = FavoriteVacancyStore().fileURL
+    func testPersistentStoresShareCanonicalApplicationSupportDirectory() throws {
+        let employerURL = try EmployerConfigurationStore().fileURL
+        let areaURL = try AreaDirectoryStore().fileURL
+        let favoritesURL = try FavoriteVacancyStore().fileURL
+        let snapshotURL = try VacancySnapshotStore().fileURL
         let directory = employerURL.deletingLastPathComponent()
 
         XCTAssertEqual(directory.lastPathComponent, ApplicationSupportLocation.directoryName)
         XCTAssertEqual(areaURL.deletingLastPathComponent(), directory)
         XCTAssertEqual(favoritesURL.deletingLastPathComponent(), directory)
+        XCTAssertEqual(snapshotURL.deletingLastPathComponent(), directory)
         XCTAssertEqual(employerURL.lastPathComponent, "employers.json")
         XCTAssertEqual(areaURL.lastPathComponent, "areas.json")
         XCTAssertEqual(favoritesURL.lastPathComponent, "favorites.json")
+    }
+
+    func testApplicationSupportFailuresNeverFallBackToTemporaryDirectory() async throws {
+        let base = temporaryDirectory()
+        try Data("blocked".utf8).write(to: base.appendingPathComponent(ApplicationSupportLocation.directoryName))
+        for manager in [TestSupportFileManager(base: nil), TestSupportFileManager(base: base)] {
+            func assertUnavailable(_ action: () throws -> Void) {
+                XCTAssertThrowsError(try action()) { error in
+                    XCTAssertTrue(error is ApplicationSupportLocationError)
+                    XCTAssertTrue(error.localizedDescription.contains("Application Support/HHVacancySber"))
+                }
+            }
+            assertUnavailable { _ = try EmployerConfigurationStore(fileManager: manager).loadOrCreate() }
+            assertUnavailable { _ = try FavoriteVacancyStore(fileManager: manager).load() }
+            assertUnavailable { try FavoriteVacancyStore(fileManager: manager).save([]) }
+            assertUnavailable { _ = try VacancySnapshotStore(fileManager: manager).load() }
+            assertUnavailable {
+                try VacancySnapshotStore(fileManager: manager).save(.init(values: [], issues: [], updatedAt: Date()))
+            }
+            do {
+                _ = try await AreaDirectoryStore(fileManager: manager).load(using: CancelledAreaClient())
+                XCTFail("Area loading must report the directory error before accessing HH")
+            } catch { XCTAssertTrue(error is ApplicationSupportLocationError) }
+        }
+        XCTAssertEqual(try String(contentsOf: base.appendingPathComponent(ApplicationSupportLocation.directoryName)), "blocked")
+    }
+
+    func testSearchResponseSkipsMalformedItemsButKeepsEnvelopeStrict() throws {
+        let data = Data(#"{"items":[{"id":"one","name":"One"},{"id":"bad","name":"Bad","salary":"unexpected"},null,42,{"id":"bad-name","name":[]},{"id":"two","name":"Two","new_field":true}],"found":6,"pages":1,"page":0,"per_page":100}"#.utf8)
+        let page = try JSONDecoder().decode(HHVacancySearchResponse.self, from: data)
+        XCTAssertEqual(page.items.map(\.id), ["one", "two"])
+        XCTAssertEqual(page.rejectedItemCount, 4)
+        XCTAssertEqual(page.found, 6)
+        for invalid in [#"{"items":{},"found":1,"pages":1,"page":0,"per_page":100}"#,
+                        #"{"items":[],"found":"one","pages":1,"page":0,"per_page":100}"#] {
+            XCTAssertThrowsError(try JSONDecoder().decode(HHVacancySearchResponse.self, from: Data(invalid.utf8)))
+        }
+    }
+
+    func testAreaLeavesAndOptionalDictionaryArraysDefaultToEmpty() throws {
+        let root = try JSONDecoder().decode(HHAreaNode.self, from: Data(#"{"id":"113","name":"Россия","areas":[{"id":"1","name":"Москва"},{"id":"2","name":"Санкт-Петербург","areas":null}]}"#.utf8))
+        XCTAssertEqual(root.areas.count, 2)
+        XCTAssertTrue(root.areas.allSatisfy { $0.areas.isEmpty })
+        XCTAssertNoThrow(try AreaDirectoryIndex(root: root))
+        for json in [#"{"experience":[]}"#, #"{"experience":[],"work_format":null,"schedule":null}"#] {
+            let dictionaries = try JSONDecoder().decode(HHVacancyDictionaries.self, from: Data(json.utf8))
+            XCTAssertTrue(dictionaries.workFormat.isEmpty)
+            XCTAssertTrue(dictionaries.schedule.isEmpty)
+        }
+        XCTAssertThrowsError(try JSONDecoder().decode(HHAreaNode.self, from: Data(#"{"id":"1","name":"Москва","areas":{}}"#.utf8)))
+        XCTAssertThrowsError(try JSONDecoder().decode(HHVacancyDictionaries.self, from: Data(#"{"experience":[],"schedule":42}"#.utf8)))
+    }
+
+    func testMalformedVacancyTriggersOneLeafRereadAndPersistentShortfall() async throws {
+        for repaired in [true, false] {
+            var requests = 0
+            let client = makeHTTPClient { _ in
+                requests += 1
+                let second = repaired && requests > 1 ? #"{"id":"two","name":"Two"}"# : #"{"id":"two","name":"Two","salary":[]}"#
+                return (200, [:], Data((#"{"items":[{"id":"one","name":"One"},"# + second + #"],"found":2,"pages":1,"page":0,"per_page":100}"#).utf8))
+            }
+            let result = try await VacancyCollectionService(client: client).collect(
+                employers: [.init(id: "1", name: "One", comment: "test")],
+                areas: try AreaDirectoryIndex(root: Self.areaTree), progress: { _ in })
+            XCTAssertEqual(requests, 2)
+            XCTAssertEqual(result.vacancies.count, repaired ? 2 : 1)
+            XCTAssertEqual(result.isComplete, repaired)
+            if !repaired {
+                XCTAssertEqual(result.issues.first?.expected, 2)
+                XCTAssertEqual(result.issues.first?.actual, 1)
+            }
+        }
+    }
+
+    func testEntireMalformedPageDoesNotHideLaterPages() async throws {
+        var pages: [Int] = []
+        let client = makeHTTPClient { request in
+            let page = Int(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!.first { $0.name == "page" }!.value!)!
+            pages.append(page)
+            let items: [[String: Any]] = page == 1
+                ? (100..<200).map { ["id": String($0), "name": 42] }
+                : (page == 0 ? Array(0..<100) : [200]).map { ["id": String($0), "name": "Valid"] }
+            return (200, [:], try JSONSerialization.data(withJSONObject: ["items": items, "found": 201, "pages": 3, "page": page, "per_page": 100]))
+        }
+        let result = try await VacancyCollectionService(client: client).collect(
+            employers: [.init(id: "1", name: "One", comment: "test")],
+            areas: try AreaDirectoryIndex(root: Self.areaTree), progress: { _ in })
+        XCTAssertEqual(pages, [0, 1, 2, 0, 1, 2])
+        XCTAssertEqual(result.vacancies.count, 101)
+        XCTAssertTrue(result.vacancies.contains { $0.id == "200" })
+        XCTAssertEqual(result.issues.first?.expected, 201)
+        XCTAssertEqual(result.issues.first?.actual, 101)
+    }
+
+    func testProductionSessionHasBoundedTimeoutsAndTLSDoesNotRetry() async {
+        XCTAssertEqual(HHAPIClient.defaultSession.configuration.timeoutIntervalForRequest, 30)
+        XCTAssertEqual(HHAPIClient.defaultSession.configuration.timeoutIntervalForResource, 120)
+        for code in [URLError.Code.secureConnectionFailed, .serverCertificateUntrusted, .notConnectedToInternet] {
+            var requests = 0
+            let client = makeHTTPClient { _ in requests += 1; throw URLError(code) }
+            do {
+                _ = try await client.searchVacancies(.init(employerID: "1"))
+                XCTFail("Expected transport error")
+            } catch { XCTAssertEqual((error as? URLError)?.code, code) }
+            XCTAssertEqual(requests, 1)
+        }
+    }
+
+    func testDatePartitionsShareBoundaryAndDeduplicateVacancies() async throws {
+        var ranges: [(from: String?, to: String?)] = []
+        let client = makeHTTPClient { request in
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!
+            let from = query.first { $0.name == "date_from" }?.value
+            let to = query.first { $0.name == "date_to" }?.value
+            ranges.append((from, to))
+            let json = from == nil
+                ? #"{"items":[],"found":2001,"pages":20,"page":0,"per_page":100}"#
+                : #"{"items":[{"id":"boundary","name":"Boundary"}],"found":1,"pages":1,"page":0,"per_page":100}"#
+            return (200, [:], Data(json.utf8))
+        }
+        let result = try await VacancyCollectionService(client: client).collect(
+            employers: [.init(id: "1", name: "One", comment: "test")],
+            areas: try AreaDirectoryIndex(root: .init(id: "113", name: "Россия")), progress: { _ in })
+        XCTAssertEqual(ranges.count, 3)
+        XCTAssertNotNil(ranges[1].to)
+        XCTAssertEqual(ranges[1].to, ranges[2].from)
+        XCTAssertEqual(result.vacancies.map(\.id), ["boundary"])
     }
 
     func testLocationClassificationIsStrict() throws {
@@ -435,19 +564,207 @@ final class HHVacancySberTests: XCTestCase {
     }
 
     func testCollectorStopsOnAccessRestriction() async throws {
-        let client = EmployerScriptedClient(behaviors: ["1": .vacancies(3), "2": .forbidden, "3": .vacancies(1)])
+        for error in [HHAPIError.forbidden(requestID: nil), .captchaRequired(requestID: nil), .rateLimited(retryAfterSeconds: 60)] {
+            let client = EmployerScriptedClient(behaviors: ["1": .vacancies(3), "2": .restriction(error), "3": .vacancies(1)])
+            let result = try await VacancyCollectionService(client: client).collect(
+                employers: ["1", "2", "3"].map { .init(id: $0, name: "Работодатель \($0)", comment: "test") },
+                areas: try AreaDirectoryIndex(root: Self.areaTree), progress: { _ in })
+            XCTAssertEqual(Set(result.vacancies.map(\.id)), Set(["1-0", "1-1", "1-2"]))
+            XCTAssertEqual(result.issues.map(\.employerID), ["2", "3"])
+            XCTAssertTrue(result.issues.allSatisfy { $0.failures.first?.contains("Сбор остановлен ограничением hh.ru") == true })
+            let requested = await client.requestedEmployerIDs
+            XCTAssertEqual(requested, ["1", "2"])
+        }
+    }
+
+    func testCollectorRetainsPagesOfEmployerInterruptedByRateLimit() async throws {
+        let client = EmployerScriptedClient(behaviors: [
+            "1": .vacancies(2), "2": .restrictionAfterFirstPage(150, .rateLimited(retryAfterSeconds: nil)), "3": .vacancies(1)
+        ])
+        let result = try await VacancyCollectionService(client: client).collect(
+            employers: ["1", "2", "3"].map { .init(id: $0, name: $0, comment: "test") },
+            areas: try AreaDirectoryIndex(root: Self.areaTree), progress: { _ in })
+        XCTAssertEqual(result.vacancies.count, 102)
+        XCTAssertEqual(result.issues.map(\.employerID), ["2", "3"])
+        XCTAssertEqual(result.issues.first?.expected, 150)
+        XCTAssertEqual(result.issues.first?.actual, 100)
+        let requested = await client.requestedEmployerIDs
+        XCTAssertEqual(requested, ["1", "2", "2"])
+    }
+
+    func testCollectorRestrictionWithoutVacanciesStillThrows() async throws {
+        let error = HHAPIError.rateLimited(retryAfterSeconds: 60)
+        let client = EmployerScriptedClient(behaviors: ["1": .restriction(error), "2": .vacancies(1)])
         do {
             _ = try await VacancyCollectionService(client: client).collect(
-                employers: ["1", "2", "3"].map { .init(id: $0, name: "Работодатель \($0)", comment: "test") },
-                areas: try AreaDirectoryIndex(root: Self.areaTree),
-                progress: { _ in }
-            )
-            XCTFail("Expected forbidden")
-        } catch let error as HHAPIError {
-            XCTAssertEqual(error, .forbidden(requestID: nil))
-        }
+                employers: ["1", "2"].map { .init(id: $0, name: $0, comment: "test") },
+                areas: try AreaDirectoryIndex(root: Self.areaTree), progress: { _ in })
+            XCTFail("Expected rate limit without a partial result")
+        } catch let actual as HHAPIError { XCTAssertEqual(actual, error) }
         let requested = await client.requestedEmployerIDs
-        XCTAssertFalse(requested.contains("3"))
+        XCTAssertEqual(requested, ["1"])
+    }
+
+    func testCollectorKeepsEarlierIssuesWhenAccessIsRestricted() async throws {
+        let client = EmployerScriptedClient(behaviors: ["1": .failure, "2": .vacancies(2), "3": .forbidden])
+        let result = try await VacancyCollectionService(client: client).collect(
+            employers: ["1", "2", "3"].map { .init(id: $0, name: $0, comment: "test") },
+            areas: try AreaDirectoryIndex(root: Self.areaTree), progress: { _ in })
+        XCTAssertEqual(result.vacancies.count, 2)
+        XCTAssertEqual(result.issues.map(\.employerID), ["1", "3"])
+        XCTAssertTrue(result.issues[0].failures.contains(URLError(.timedOut).localizedDescription))
+    }
+
+    func testCollectorAuthenticationAndCancellationStillAbortAfterSuccessfulEmployer() async throws {
+        let errors: [HHAPIError] = [.unauthorized, .missingApplicationToken, .placeholderApplicationToken]
+        for behavior in errors.map(EmployerScriptedClient.Behavior.restriction) + [.cancelled] {
+            let client = EmployerScriptedClient(behaviors: ["1": .vacancies(2), "2": behavior, "3": .vacancies(1)])
+            do {
+                _ = try await VacancyCollectionService(client: client).collect(
+                    employers: ["1", "2", "3"].map { .init(id: $0, name: $0, comment: "test") },
+                    areas: try AreaDirectoryIndex(root: Self.areaTree), progress: { _ in })
+                XCTFail("Authentication failures and cancellation must not return a partial result")
+            } catch {
+                switch behavior {
+                case .restriction(let expected): XCTAssertEqual(error as? HHAPIError, expected)
+                case .cancelled: XCTAssertTrue(error is CancellationError)
+                default: XCTFail("Unexpected scenario")
+                }
+            }
+            let requested = await client.requestedEmployerIDs
+            XCTAssertEqual(requested, ["1", "2"])
+        }
+    }
+
+    @MainActor
+    func testSnapshotRestoresCompleteAndPartialResultsWithoutNetworkAndRefreshUsesNetwork() async throws {
+        for partial in [false, true] {
+            let directory = temporaryDirectory()
+            let store = VacancySnapshotStore(fileURL: directory.appendingPathComponent("vacancies.json"))
+            let entries = ["1", "2", "3"].map { EmployerConfigurationEntry(id: $0, name: $0, comment: "test") }
+            let date = Date(timeIntervalSince1970: 1_788_200_000)
+            let client = EmployerScriptedClient(behaviors: [
+                "1": .vacancies(2), "2": partial ? .restriction(.rateLimited(retryAfterSeconds: 60)) : .vacancies(1),
+                "3": .vacancies(1)
+            ])
+            let original = VacancySearchViewModel(apiClient: client, employerStore: TestEmployerStore(entries: entries),
+                areaStore: AreaDirectoryStore(fileURL: directory.appendingPathComponent("areas.json")),
+                snapshotStore: store, currentDate: { date })
+            await original.refreshVacancies()
+            XCTAssertNil(original.errorMessage)
+            XCTAssertNil(original.snapshotWarning)
+            XCTAssertTrue(original.canSearch)
+            let saved = try XCTUnwrap(store.load())
+            XCTAssertEqual(saved.updatedAt, date)
+            XCTAssertEqual(saved.issues.isEmpty, !partial)
+            XCTAssertEqual(saved.vacancies.count, partial ? 2 : 4)
+            if partial {
+                XCTAssertTrue(original.collectionWarning?.contains("Сбор остановлен ограничением hh.ru") == true)
+                let requested = await client.requestedEmployerIDs
+                XCTAssertEqual(requested, ["1", "2"])
+            }
+            let offline = EmployerScriptedClient(behaviors: ["1": .vacancies(5), "2": .vacancies(0), "3": .vacancies(0)])
+            let restored = VacancySearchViewModel(apiClient: offline, employerStore: TestEmployerStore(entries: entries),
+                areaStore: AreaDirectoryStore(fileURL: directory.appendingPathComponent("areas-restored.json")),
+                snapshotStore: store, currentDate: { date })
+            await restored.loadPersistenceIfNeeded()
+            let initialRequests = await offline.requestedEmployerIDs
+            XCTAssertTrue(initialRequests.isEmpty)
+            XCTAssertEqual(restored.results.map(\.id), original.results.map(\.id))
+            XCTAssertEqual(restored.results.map(\.location), original.results.map(\.location))
+            XCTAssertEqual(restored.updatedAtMessage, original.updatedAtMessage)
+            XCTAssertEqual(restored.collectionWarning, original.collectionWarning)
+            XCTAssertTrue(restored.hasSearched)
+            XCTAssertTrue(restored.canSearch)
+            XCTAssertTrue(restored.canExportStatisticsPDF)
+            XCTAssertEqual(restored.statisticsReportSnapshot().sourceNote.contains("Выгрузка общего списка неполная"), partial)
+            if partial {
+                // Incomplete snapshots never satisfy the in-memory TTL path.
+                await restored.search()
+            } else {
+                await restored.refreshVacancies()
+            }
+            let refreshedRequests = await offline.requestedEmployerIDs
+            XCTAssertEqual(refreshedRequests, ["1", "2", "3"])
+            XCTAssertEqual(restored.results.count, 5)
+            XCTAssertNil(restored.collectionWarning)
+            XCTAssertTrue(try XCTUnwrap(store.load()).issues.isEmpty)
+        }
+    }
+
+    @MainActor
+    func testIncompleteFailedAndCancelledRefreshDoNotOverwriteCompleteDiskSnapshot() async throws {
+        let directory = temporaryDirectory()
+        let store = VacancySnapshotStore(fileURL: directory.appendingPathComponent("vacancies.json"))
+        let client = EmployerScriptedClient(behaviors: ["1": .vacancies(150)])
+        let model = VacancySearchViewModel(apiClient: client,
+            employerStore: TestEmployerStore(entries: [.init(id: "1", name: "One", comment: "test")]),
+            areaStore: AreaDirectoryStore(fileURL: directory.appendingPathComponent("areas.json")), snapshotStore: store)
+        await model.refreshVacancies()
+        let savedBytes = try Data(contentsOf: store.fileURL)
+        let timestamp = model.updatedAtMessage
+        for behavior: EmployerScriptedClient.Behavior in [
+            .restrictionAfterFirstPage(150, .rateLimited(retryAfterSeconds: nil)), .failure, .cancelled
+        ] {
+            await client.setBehavior(behavior, employerID: "1")
+            await model.refreshVacancies()
+            XCTAssertEqual(model.results.count, 150)
+            XCTAssertEqual(model.updatedAtMessage, timestamp)
+            XCTAssertEqual(try Data(contentsOf: store.fileURL), savedBytes)
+            XCTAssertTrue(model.canSearch)
+        }
+    }
+
+    @MainActor
+    func testSnapshotLoadFailureLeavesRefreshAvailableAndSuccessfulRefreshRepairsCache() async throws {
+        for contents in ["not JSON", "{\"version\":99}"] {
+            let directory = temporaryDirectory()
+            let store = VacancySnapshotStore(fileURL: directory.appendingPathComponent("vacancies.json"))
+            try Data(contents.utf8).write(to: store.fileURL)
+            let client = EmployerScriptedClient(behaviors: ["1": .vacancies(1)])
+            let model = VacancySearchViewModel(apiClient: client,
+                employerStore: TestEmployerStore(entries: [.init(id: "1", name: "One", comment: "test")]),
+                areaStore: AreaDirectoryStore(fileURL: directory.appendingPathComponent("areas.json")), snapshotStore: store)
+            await model.loadPersistenceIfNeeded()
+            XCTAssertNotNil(model.snapshotWarning)
+            XCTAssertTrue(model.canSearch)
+            XCTAssertTrue(model.results.isEmpty)
+            XCTAssertEqual(try String(contentsOf: store.fileURL), contents)
+            await model.refreshVacancies()
+            XCTAssertNil(model.snapshotWarning)
+            XCTAssertEqual(try XCTUnwrap(store.load()).vacancies.count, 1)
+        }
+    }
+
+    @MainActor
+    func testSnapshotSaveFailureKeepsReceivedResultsAndReportsWarning() async throws {
+        let directory = temporaryDirectory()
+        let blocker = directory.appendingPathComponent("file")
+        try Data("existing data".utf8).write(to: blocker)
+        let store = VacancySnapshotStore(fileURL: blocker.appendingPathComponent("vacancies.json"))
+        let model = VacancySearchViewModel(apiClient: EmployerScriptedClient(behaviors: ["1": .vacancies(2)]),
+            employerStore: TestEmployerStore(entries: [.init(id: "1", name: "One", comment: "test")]),
+            areaStore: AreaDirectoryStore(fileURL: directory.appendingPathComponent("areas.json")), snapshotStore: store)
+        await model.refreshVacancies()
+        XCTAssertEqual(model.results.count, 2)
+        XCTAssertNil(model.errorMessage)
+        XCTAssertTrue(model.snapshotWarning?.contains("Не удалось сохранить снимок вакансий") == true)
+        XCTAssertTrue(model.canSearch)
+        XCTAssertEqual(try String(contentsOf: blocker), "existing data")
+    }
+
+    func testSnapshotStoreMissingEmptyAndDuplicateRecords() throws {
+        let store = VacancySnapshotStore(fileURL: temporaryDirectory().appendingPathComponent("vacancies.json"))
+        XCTAssertNil(try store.load())
+        let date = Date(timeIntervalSince1970: 1_788_200_000)
+        try store.save(.init(values: [], issues: [], updatedAt: date))
+        let empty = try XCTUnwrap(store.load())
+        XCTAssertEqual(empty.updatedAt, date)
+        XCTAssertTrue(empty.vacancies.isEmpty)
+        XCTAssertTrue(empty.issues.isEmpty)
+        let row = VacancySearchResult(summary: summary(id: "duplicate", areaID: "1", areaName: "Москва"), location: .unknown)
+        try store.save(.init(values: [row, row], issues: [], updatedAt: date))
+        XCTAssertThrowsError(try store.load())
     }
 
     @MainActor
@@ -1151,6 +1468,64 @@ final class HHVacancySberTests: XCTestCase {
                                            now: { date.addingTimeInterval(AreaDirectoryStore.defaultTTL + 1) })
             do { _ = try await store.load(using: client); XCTFail("expected forbidden") }
             catch let error as HHAPIError { XCTAssertEqual(error, .forbidden(requestID: nil)) }
+        }
+    }
+
+    @MainActor
+    func testArchiveDoesNotStartWhileRefreshIsQueuedOrRunning() async {
+        for background in [true, false] {
+            let entered = expectation(description: "Search in progress")
+            let release = TestAsyncSignal()
+            let client = MockAPIClient(mode: .simple, beforeSearchResponse: { entered.fulfill(); await release.wait() })
+            let record = FavoriteVacancyRecord(result: statisticsVacancy(id: "favorite", date: nil),
+                favoritedAt: .distantPast, updatedAt: .distantPast)
+            let model = VacancySearchViewModel(apiClient: client,
+                employerStore: TestEmployerStore(entries: [.init(id: "3529", name: "СБЕР", comment: "test")]),
+                areaStore: AreaDirectoryStore(fileURL: temporaryDirectory().appendingPathComponent("areas.json")),
+                favoritesStore: InMemoryFavoriteVacancyStore(favorites: [record]))
+            await model.loadPersistenceIfNeeded()
+            model.startRefresh()
+            await model.checkArchiveStatusesIfNeeded(background: background)
+            await fulfillment(of: [entered], timeout: 2)
+            XCTAssertTrue(model.isLoading)
+            await model.checkArchiveStatusesIfNeeded(background: background)
+            let detailRequests = await client.detailRequestCount
+            XCTAssertEqual(detailRequests, 0)
+            await release.signal()
+        }
+    }
+
+    @MainActor
+    func testSearchInterruptsArchiveAfterCurrentRequestAndPersistsCompletedUpdate() async {
+        for background in [true, false] {
+            let entered = expectation(description: "Archive request suspended")
+            let release = TestAsyncSignal()
+            let client = MockAPIClient(mode: .archiveRecoverableFailure,
+                beforeFirstDetailResponse: { entered.fulfill(); await release.wait() })
+            let records = ["first", "second"].map { id in
+                FavoriteVacancyRecord(result: statisticsVacancy(id: id, date: nil),
+                    favoritedAt: .distantPast, updatedAt: .distantPast)
+            }
+            let store = SlowRecordingFavoriteStore(favorites: records)
+            let model = VacancySearchViewModel(apiClient: client,
+                employerStore: TestEmployerStore(entries: [.init(id: "3529", name: "СБЕР", comment: "test")]),
+                areaStore: AreaDirectoryStore(fileURL: temporaryDirectory().appendingPathComponent("areas.json")),
+                favoritesStore: store)
+            let archive = Task { await model.checkArchiveStatusesIfNeeded(background: background) }
+            await fulfillment(of: [entered], timeout: 2)
+            // A fast refresh may finish before the current archive request returns.
+            // The interrupted archive cycle still must not enqueue its next request.
+            await model.refreshVacancies()
+            XCTAssertFalse(model.isLoading)
+            await release.signal()
+            await archive.value
+            await model.waitForPendingFavoritesSaves()
+            let checkedIDs = await client.requestedDetailIDs
+            XCTAssertEqual(checkedIDs.count, 1)
+            XCTAssertEqual(model.favorites.filter { $0.archiveCheckedAt != nil }.count, 1)
+            XCTAssertTrue(model.favorites.first { $0.id == checkedIDs.first }?.isArchived == true)
+            XCTAssertEqual(store.lastSaved, model.favorites)
+            XCTAssertTrue(model.canSearch)
         }
     }
 
@@ -3536,7 +3911,7 @@ private struct CancelledAreaClient: HHVacancyAPIClient {
 }
 
 private actor EmployerScriptedClient: HHVacancyAPIClient {
-    enum Behavior: Sendable { case vacancies(Int), failAfterFirstPage(Int), failure, forbidden }
+    enum Behavior: Sendable { case vacancies(Int), failAfterFirstPage(Int), failure, forbidden, restriction(HHAPIError), restrictionAfterFirstPage(Int, HHAPIError), cancelled }
     var behaviors: [String: Behavior]
     func setBehavior(_ value: Behavior, employerID: String) { behaviors[employerID] = value }
     private(set) var requestedEmployerIDs: [String] = []
@@ -3553,6 +3928,11 @@ private actor EmployerScriptedClient: HHVacancyAPIClient {
         switch behaviors[request.employerID] ?? .vacancies(0) {
         case .failure: throw URLError(.timedOut)
         case .forbidden: throw HHAPIError.forbidden(requestID: nil)
+        case .restriction(let error): throw error
+        case .cancelled: throw CancellationError()
+        case .restrictionAfterFirstPage(let value, let error):
+            if request.page > 0 { throw error }
+            count = value
         case .vacancies(let value): count = value
         case .failAfterFirstPage(let value):
             if request.page > 0 { throw HHAPIError.requestFailed(statusCode: 502, message: nil) }
@@ -3584,9 +3964,12 @@ private actor MockAPIClient: HHVacancyAPIClient {
     private(set) var searchRequestCount = 0
     private var shouldFailSearch = false
     private let beforeFirstDetailResponse: (@Sendable () async throws -> Void)?
-    init(mode: Mode, beforeFirstDetailResponse: (@Sendable () async throws -> Void)? = nil) {
+    private let beforeSearchResponse: (@Sendable () async throws -> Void)?
+    init(mode: Mode, beforeFirstDetailResponse: (@Sendable () async throws -> Void)? = nil,
+         beforeSearchResponse: (@Sendable () async throws -> Void)? = nil) {
         self.mode = mode
         self.beforeFirstDetailResponse = beforeFirstDetailResponse
+        self.beforeSearchResponse = beforeSearchResponse
     }
     func enableDelayedSearchFailure() { shouldFailSearch = true }
     nonisolated func validateVacanciesAccess() throws {}
@@ -3647,6 +4030,7 @@ private actor MockAPIClient: HHVacancyAPIClient {
     }
     func searchVacancies(_ request: HHVacancySearchRequest) async throws -> HHVacancySearchResponse {
         searchRequestCount += 1
+        try await beforeSearchResponse?()
         if case .delayedRefreshFailure = mode, shouldFailSearch {
             try await Task.sleep(nanoseconds: 100_000_000)
             throw URLError(.timedOut)
@@ -4039,5 +4423,19 @@ private final class AuditFailingFavoriteStore: FavoriteVacancyStoring, @unchecke
         count += 1
         if count == 1 { throw CocoaError(.fileWriteOutOfSpace) }
         records = favorites
+    }
+}
+
+private final class TestSupportFileManager: FileManager, @unchecked Sendable {
+    let base: URL?
+    init(base: URL?) { self.base = base; super.init() }
+    override func url(for directory: FileManager.SearchPathDirectory, in domain: FileManager.SearchPathDomainMask,
+                      appropriateFor url: URL?, create shouldCreate: Bool) throws -> URL {
+        guard let base else { throw CocoaError(.fileReadNoPermission) }
+        return base
+    }
+    override var temporaryDirectory: URL {
+        XCTFail("Persistent data must never fall back to TMPDIR")
+        return super.temporaryDirectory
     }
 }

@@ -29,6 +29,36 @@ struct HHVacancySearchResponse: Decodable {
     let pages: Int
     let page: Int
     let perPage: Int
+    let rejectedItemCount: Int
+
+    init(items: [HHVacancySummary], found: Int, pages: Int, page: Int, perPage: Int, rejectedItemCount: Int = 0) {
+        self.items = items
+        self.found = found
+        self.pages = pages
+        self.page = page
+        self.perPage = perPage
+        self.rejectedItemCount = rejectedItemCount
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        let decoded = try values.decode([VacancyItem].self, forKey: .items)
+        items = decoded.compactMap(\.value)
+        rejectedItemCount = decoded.count - items.count
+        found = try values.decode(Int.self, forKey: .found)
+        pages = try values.decode(Int.self, forKey: .pages)
+        page = try values.decode(Int.self, forKey: .page)
+        perPage = try values.decode(Int.self, forKey: .perPage)
+    }
+
+    // Each wrapper consumes exactly one JSON element even if its vacancy fails
+    // to decode. The page envelope remains strict, and `found` retains shortfalls.
+    private struct VacancyItem: Decodable {
+        let value: HHVacancySummary?
+        init(from decoder: Decoder) throws {
+            value = try? HHVacancySummary(from: decoder)
+        }
+    }
 
     enum CodingKeys: String, CodingKey {
         case items
@@ -39,7 +69,7 @@ struct HHVacancySearchResponse: Decodable {
     }
 }
 
-struct HHVacancySummary: Decodable, Identifiable {
+struct HHVacancySummary: Codable, Identifiable {
     let id: String
     let name: String
     let employer: HHEmployer?
@@ -464,12 +494,32 @@ struct HHAreaNode: Codable, Equatable, Identifiable, Sendable {
         self.name = name
         self.areas = areas
     }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id)
+        name = try values.decode(String.self, forKey: .name)
+        areas = try values.decodeIfPresent([HHAreaNode].self, forKey: .areas) ?? []
+    }
 }
 
 struct HHVacancyDictionaries: Decodable, Sendable {
     let experience: [HHNamedItem]
     let workFormat: [HHNamedItem]
     let schedule: [HHNamedItem]
+
+    init(experience: [HHNamedItem], workFormat: [HHNamedItem], schedule: [HHNamedItem]) {
+        self.experience = experience
+        self.workFormat = workFormat
+        self.schedule = schedule
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        experience = try values.decode([HHNamedItem].self, forKey: .experience)
+        workFormat = try values.decodeIfPresent([HHNamedItem].self, forKey: .workFormat) ?? []
+        schedule = try values.decodeIfPresent([HHNamedItem].self, forKey: .schedule) ?? []
+    }
 
     enum CodingKeys: String, CodingKey {
         case experience, schedule
@@ -628,7 +678,7 @@ struct HHSalaryRange: Codable, Equatable {
     }
 }
 
-struct HHVacancySnippet: Decodable, Equatable {
+struct HHVacancySnippet: Codable, Equatable {
     let requirement: String?
     let responsibility: String?
 
@@ -691,6 +741,19 @@ struct VacancySearchResult: Identifiable {
         )
         self.isTechnologyRelated = isInformationSecurityRelated || VacancyTechnologyClassifier.matches(
             title: details.name, roles: roles, context: context
+        )
+    }
+
+    init(summary: HHVacancySummary, location: VacancyLocation) {
+        self.init(
+            id: summary.id, summary: summary,
+            details: HHVacancyDetails(
+                id: summary.id, name: summary.name, employer: summary.employer,
+                area: summary.area, salary: summary.salary, alternateURL: summary.alternateURL,
+                description: nil, schedule: summary.schedule, workFormat: summary.workFormat,
+                department: summary.department
+            ),
+            location: location
         )
     }
 

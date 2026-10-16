@@ -76,11 +76,14 @@ struct EmployerConfigurationStore: EmployerConfigurationStoring, @unchecked Send
     }
 
     var fileURL: URL {
-        if let configuredFileURL { return configuredFileURL }
-        return ApplicationSupportLocation.fileURL(named: "employers.json", fileManager: fileManager)
+        get throws {
+            if let configuredFileURL { return configuredFileURL }
+            return try ApplicationSupportLocation.fileURL(named: "employers.json", fileManager: fileManager)
+        }
     }
 
     func loadOrCreate() throws -> EmployerConfiguration {
+        let fileURL = try self.fileURL
         if !fileManager.fileExists(atPath: fileURL.path) {
             guard let bundledDefaultURL else { throw EmployerConfigurationError.missingBundledDefault }
             let directory = fileURL.deletingLastPathComponent()

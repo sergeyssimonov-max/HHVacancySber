@@ -8,7 +8,7 @@ struct VacancyCollectionProgress: Equatable, Sendable {
 
 /// An employer whose vacancies were not read completely: the count differs from
 /// hh.ru `found`, or some partitions failed after the client's own retries.
-struct VacancyCollectionIssue: Equatable, Sendable {
+struct VacancyCollectionIssue: Codable, Equatable, Sendable {
     let employerID: String
     let employerName: String
     /// `found` of the employer's first request; nil when even that request failed.
@@ -38,7 +38,8 @@ struct VacancyCollectionResult: Sendable {
 
 /// Best-effort full collection. hh.ru results change while they are paged, so a
 /// short read is re-read once and then kept with an issue instead of discarding
-/// every employer. Access, rate-limit, CAPTCHA and cancellation errors stop the run.
+/// every employer. Access restrictions stop the run and retain received pages;
+/// authentication errors and cancellation still abort it.
 struct VacancyCollectionService: Sendable {
     static let maximumAccessibleResults = 2_000
     static let perPage = 100
@@ -94,15 +95,26 @@ struct VacancyCollectionService: Sendable {
                                       maximumDuration: maximumDuration, uptime: uptime)
         do {
             return try await VacancyCollectionService(client: run, now: now).collectWithinBudget(
-                employers: employers, areas: areas, progress: progress
+                employers: employers, areas: areas, run: run, progress: progress
             )
         } catch let error as CollectionLimitError {
+            try Task.checkCancellation()
             return await run.partialResult(employers: employers, error: error)
+        } catch let error as HHAPIError {
+            try Task.checkCancellation()
+            switch error {
+            case .rateLimited, .forbidden, .captchaRequired:
+                if let result = await run.accessRestrictedResult(employers: employers, error: error) {
+                    return result
+                }
+            default: break
+            }
+            throw error
         }
     }
 
     private func collectWithinBudget(
-        employers: [EmployerConfigurationEntry], areas: AreaDirectoryIndex,
+        employers: [EmployerConfigurationEntry], areas: AreaDirectoryIndex, run: CollectionRunClient,
         progress: @escaping Progress
     ) async throws -> VacancyCollectionResult {
         var all: [String: HHVacancySummary] = [:]
@@ -119,6 +131,7 @@ struct VacancyCollectionService: Sendable {
                 firstError = firstError ?? error
                 issues.append(.init(employerID: employer.id, employerName: employer.name, expected: nil, actual: 0,
                                     failures: [error.localizedDescription]))
+                await run.recordFinishedEmployer(employer.id, issues: issues)
                 continue
             }
             let outcome = try await collectPartition(
@@ -131,6 +144,7 @@ struct VacancyCollectionService: Sendable {
                 issues.append(.init(employerID: employer.id, employerName: employer.name, expected: initialResponse.found,
                                     actual: outcome.values.count, failures: outcome.failures))
             }
+            await run.recordFinishedEmployer(employer.id, issues: issues)
         }
         // Nothing read and a request failed (for example, the network is down): report the
         // error so the previous complete result stays on screen.
@@ -346,7 +360,7 @@ struct VacancyCollectionService: Sendable {
             }
             for item in response.items { result[item.id] = item }
             await progress(.init(employerName: employer.name, loadedCount: result.count, partition: partitionName(request)))
-            if response.items.isEmpty { break }
+            if response.items.isEmpty, response.rejectedItemCount == 0 { break }
         }
         return Outcome(values: result)
     }
@@ -392,7 +406,8 @@ private enum CollectionLimitError: LocalizedError {
 }
 
 /// Per-collection budget, shared by every recursive branch. It retains successful
-/// pages so unwinding a deep split cannot discard data on reaching the limit.
+/// pages so unwinding a deep split cannot discard data on reaching a budget
+/// or an access restriction.
 private actor CollectionRunClient: HHVacancyAPIClient {
     nonisolated let client: any HHVacancyAPIClient
     private let maximumRequests: Int
@@ -403,6 +418,8 @@ private actor CollectionRunClient: HHVacancyAPIClient {
     private var employerValues: [String: Set<String>] = [:]
     private var expected: [String: Int] = [:]
     private var dictionaries: HHVacancyDictionaries?
+    private var finishedEmployers: Set<String> = []
+    private var finishedIssues: [VacancyCollectionIssue] = []
 
     init(client: any HHVacancyAPIClient, maximumRequests: Int, maximumDuration: TimeInterval,
          uptime: @escaping @Sendable () -> TimeInterval) {
@@ -447,5 +464,20 @@ private actor CollectionRunClient: HHVacancyAPIClient {
             .init(employerID: $0.id, employerName: $0.name, expected: expected[$0.id],
                   actual: employerValues[$0.id]?.count ?? 0, failures: [error.localizedDescription])
         })
+    }
+
+    func recordFinishedEmployer(_ id: String, issues: [VacancyCollectionIssue]) {
+        finishedEmployers.insert(id)
+        finishedIssues = issues
+    }
+
+    func accessRestrictedResult(employers: [EmployerConfigurationEntry], error: HHAPIError) -> VacancyCollectionResult? {
+        guard !values.isEmpty else { return nil }
+        let failures = ["Сбор остановлен ограничением hh.ru: \(error.localizedDescription)"]
+        let unfinished = employers.filter { !finishedEmployers.contains($0.id) }.map {
+            VacancyCollectionIssue(employerID: $0.id, employerName: $0.name, expected: expected[$0.id],
+                                   actual: employerValues[$0.id]?.count ?? 0, failures: failures)
+        }
+        return .init(vacancies: Array(values.values), issues: finishedIssues + unfinished)
     }
 }

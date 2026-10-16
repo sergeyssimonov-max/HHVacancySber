@@ -25,7 +25,8 @@ enum AppComposition {
         return VacancySearchViewModel(
             apiClient: HHAPIClient(),
             employerStore: EmployerConfigurationStore(bundledDefaultURL: defaultURL),
-            favoritesStore: FavoriteVacancyStore()
+            favoritesStore: FavoriteVacancyStore(),
+            snapshotStore: VacancySnapshotStore()
         )
     }
 }

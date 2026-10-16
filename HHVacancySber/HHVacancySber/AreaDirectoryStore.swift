@@ -104,12 +104,15 @@ struct AreaDirectoryStore: @unchecked Sendable {
     }
 
     var fileURL: URL {
-        if let configuredFileURL { return configuredFileURL }
-        return ApplicationSupportLocation.fileURL(named: "areas.json", fileManager: fileManager)
+        get throws {
+            if let configuredFileURL { return configuredFileURL }
+            return try ApplicationSupportLocation.fileURL(named: "areas.json", fileManager: fileManager)
+        }
     }
 
     func load(using client: any HHVacancyAPIClient) async throws -> AreaDirectorySnapshot {
-        let cached = try? readCache()
+        let fileURL = try self.fileURL
+        let cached = try? readCache(at: fileURL)
         let cachedIndex = cached.flatMap { try? AreaDirectoryIndex(root: $0.root) }
         if let cached, let cachedIndex,
            now().timeIntervalSince(cached.fetchedAt) >= 0,
@@ -121,7 +124,7 @@ struct AreaDirectoryStore: @unchecked Sendable {
             try Task.checkCancellation()
             let index = try AreaDirectoryIndex(root: root)
             do {
-                try write(root: root)
+                try write(root: root, to: fileURL)
             } catch {
                 return AreaDirectorySnapshot(
                     index: index,
@@ -140,13 +143,13 @@ struct AreaDirectoryStore: @unchecked Sendable {
         }
     }
 
-    private func readCache() throws -> AreaDirectoryCache {
+    private func readCache(at fileURL: URL) throws -> AreaDirectoryCache {
         let cache = try JSONDecoder.areaDecoder.decode(AreaDirectoryCache.self, from: Data(contentsOf: fileURL))
         guard cache.version == AreaDirectoryCache.currentVersion else { throw AreaDirectoryError.unsupportedVersion(cache.version) }
         return cache
     }
 
-    private func write(root: HHAreaNode) throws {
+    private func write(root: HHAreaNode, to fileURL: URL) throws {
         try fileManager.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         let cache = AreaDirectoryCache(version: AreaDirectoryCache.currentVersion, fetchedAt: now(), root: root)
         try JSONEncoder.areaEncoder.encode(cache).write(to: fileURL, options: .atomic)

@@ -182,11 +182,14 @@ struct FavoriteVacancyStore: FavoriteVacancyStoring, @unchecked Sendable {
     }
 
     var fileURL: URL {
-        if let configuredFileURL { return configuredFileURL }
-        return ApplicationSupportLocation.fileURL(named: "favorites.json", fileManager: fileManager)
+        get throws {
+            if let configuredFileURL { return configuredFileURL }
+            return try ApplicationSupportLocation.fileURL(named: "favorites.json", fileManager: fileManager)
+        }
     }
 
     func load() throws -> [FavoriteVacancyRecord] {
+        let fileURL = try self.fileURL
         guard fileManager.fileExists(atPath: fileURL.path) else { return [] }
         let data = try Data(contentsOf: fileURL)
         if data.trimmingJSONWhitespace == Data("[]".utf8) { return [] }
@@ -205,6 +208,7 @@ struct FavoriteVacancyStore: FavoriteVacancyStoring, @unchecked Sendable {
     }
 
     func save(_ favorites: [FavoriteVacancyRecord]) throws {
+        let fileURL = try self.fileURL
         try fileManager.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         let value = FavoriteVacancyContainer(version: FavoriteVacancyContainer.currentVersion, favorites: favorites)
         try JSONEncoder.favoritesEncoder.encode(value).write(to: fileURL, options: .atomic)

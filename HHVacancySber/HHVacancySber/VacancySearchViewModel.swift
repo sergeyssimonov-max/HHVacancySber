@@ -41,6 +41,7 @@ final class VacancySearchViewModel: ObservableObject {
     @Published private(set) var statusMessage: String?
     @Published private(set) var updatedAtMessage: String?
     @Published private(set) var favoritesWarning: String?
+    @Published private(set) var snapshotWarning: String?
     /// Employers read incompletely by the last successful search.
     @Published private(set) var collectionWarning: String?
     @Published private(set) var hasSearched = false
@@ -59,6 +60,7 @@ final class VacancySearchViewModel: ObservableObject {
     private let employerStore: any EmployerConfigurationStoring
     private let areaStore: AreaDirectoryStore
     private let favoritesStore: any FavoriteVacancyStoring
+    private let snapshotStore: (any VacancySnapshotStoring)?
     private let favoritePDFExporter: any FavoriteVacanciesPDFExporting
     private let statisticsPDFDestination: @MainActor (String) -> URL?
     private let currentDate: @Sendable () -> Date
@@ -77,6 +79,7 @@ final class VacancySearchViewModel: ObservableObject {
     private var isFavoritesPersistenceWritable = false
     private var isArchiveCheckRunning = false
     private var resultsRevision = 0
+    private var searchGeneration = 0
     private var archiveAttempts: [String: Date] = [:]
     private var nextArchiveBatchAt = Date.distantPast
     private final class DetailFlight: @unchecked Sendable {
@@ -136,6 +139,7 @@ final class VacancySearchViewModel: ObservableObject {
         employerStore: any EmployerConfigurationStoring,
         areaStore: AreaDirectoryStore = AreaDirectoryStore(),
         favoritesStore: any FavoriteVacancyStoring = InMemoryFavoriteVacancyStore(),
+        snapshotStore: (any VacancySnapshotStoring)? = nil,
         favoritePDFExporter: (any FavoriteVacanciesPDFExporting)? = nil,
         statisticsPDFDestination: (@MainActor (String) -> URL?)? = nil,
         currentDate: @escaping @Sendable () -> Date = { Date() }
@@ -144,6 +148,7 @@ final class VacancySearchViewModel: ObservableObject {
         self.employerStore = employerStore
         self.areaStore = areaStore
         self.favoritesStore = favoritesStore
+        self.snapshotStore = snapshotStore
         self.favoritePDFExporter = favoritePDFExporter ?? FavoriteVacanciesPDFExporter()
         self.statisticsPDFDestination = statisticsPDFDestination ?? Self.chooseStatisticsPDFDestination
         self.currentDate = currentDate
@@ -240,6 +245,20 @@ final class VacancySearchViewModel: ObservableObject {
             isFavoritesPersistenceWritable = true
         }
         catch { favoritesWarning = error.localizedDescription }
+        do {
+            if let snapshot = try snapshotStore?.load() {
+                results = orderedNewestFirst(snapshot.results)
+                cache = VacancySearchCache(values: results, updatedAt: snapshot.updatedAt, issues: snapshot.issues)
+                updatedAtMessage = timeMessage(snapshot.updatedAt)
+                collectionWarning = Self.makeCollectionWarning(for: snapshot.issues)
+                hasSearched = true
+                statusMessage = snapshot.issues.isEmpty
+                    ? "Показана сохранённая полная выборка."
+                    : "Показана сохранённая неполная выборка."
+            }
+        } catch {
+            snapshotWarning = "Не удалось загрузить снимок вакансий: \(error.localizedDescription)"
+        }
         isPersistenceLoaded = true
     }
 
@@ -280,6 +299,7 @@ final class VacancySearchViewModel: ObservableObject {
     private func performSearch(useCache: Bool) async {
         await loadPersistenceIfNeeded()
         guard !isLoading else { return }
+        searchGeneration += 1
         let now = currentDate()
         if useCache, let cache, cache.issues.isEmpty, now.timeIntervalSince(cache.updatedAt) >= 0,
            now.timeIntervalSince(cache.updatedAt) < Self.searchCacheTTL {
@@ -309,24 +329,7 @@ final class VacancySearchViewModel: ObservableObject {
             }
             try Task.checkCancellation()
             let values = orderedNewestFirst(collection.vacancies.map { summary -> VacancySearchResult in
-                let fallback = HHVacancyDetails(
-                    id: summary.id,
-                    name: summary.name,
-                    employer: summary.employer,
-                    area: summary.area,
-                    salary: summary.salary,
-                    alternateURL: summary.alternateURL,
-                    description: nil,
-                    schedule: summary.schedule,
-                    workFormat: summary.workFormat,
-                    department: summary.department
-                )
-                return VacancySearchResult(
-                    id: summary.id,
-                    summary: summary,
-                    details: fallback,
-                    location: areaSnapshot.index.location(for: summary)
-                )
+                VacancySearchResult(summary: summary, location: areaSnapshot.index.location(for: summary))
             })
             if !collection.isComplete, let cache, cache.issues.isEmpty {
                 collectionWarning = Self.makeCollectionWarning(for: collection.issues)?
@@ -336,8 +339,9 @@ final class VacancySearchViewModel: ObservableObject {
             }
             resultsRevision += 1
             results = values
-            cache = VacancySearchCache(values: values, updatedAt: now, issues: collection.issues)
-            updatedAtMessage = timeMessage(now)
+            let updatedAt = currentDate()
+            cache = VacancySearchCache(values: values, updatedAt: updatedAt, issues: collection.issues)
+            updatedAtMessage = timeMessage(updatedAt)
             collectionWarning = Self.makeCollectionWarning(for: collection.issues)
             if collection.isComplete {
                 statusMessage = values.isEmpty ? "У выбранных работодателей нет открытых вакансий." : "Готово: \(values.count) уникальных вакансий."
@@ -345,6 +349,15 @@ final class VacancySearchViewModel: ObservableObject {
                 statusMessage = "Готово с пропусками: \(values.count) уникальных вакансий, неполностью загружено работодателей: \(collection.issues.count)."
             }
             normalizeFilters()
+            if let snapshotStore {
+                let snapshot = VacancySnapshot(values: values, issues: collection.issues, updatedAt: updatedAt)
+                do {
+                    try await Task.detached { try snapshotStore.save(snapshot) }.value
+                    snapshotWarning = nil
+                } catch {
+                    snapshotWarning = "Не удалось сохранить снимок вакансий: \(error.localizedDescription)"
+                }
+            }
         } catch is CancellationError {
             // A cancelled first search returns to the initial screen, not to "no vacancies found".
             if cache == nil { hasSearched = false }
@@ -359,7 +372,10 @@ final class VacancySearchViewModel: ObservableObject {
         guard !issues.isEmpty else { return nil }
         let shown = issues.prefix(3).map(\.message).joined(separator: ". ")
         let rest = issues.count > 3 ? ". Еще работодателей с пропусками: \(issues.count - 3)" : ""
-        return "Выгрузка неполная. \(shown)\(rest). Показаны полученные вакансии, повторите обновление позже."
+        let restriction = issues.contains { issue in
+            issue.failures.contains { $0.hasPrefix("Сбор остановлен ограничением hh.ru") }
+        } ? "Сбор остановлен ограничением hh.ru. " : ""
+        return "Выгрузка неполная. \(restriction)\(shown)\(rest). Показаны полученные вакансии, повторите обновление позже."
     }
 
     func toggleExplanation(for id: String) {
@@ -560,8 +576,10 @@ final class VacancySearchViewModel: ObservableObject {
 
     func checkArchiveStatusesIfNeeded(background: Bool = false) async {
         await loadPersistenceIfNeeded()
-        guard !isArchiveCheckRunning, !(background && (isLoading || isExportingFavoritesPDF)),
+        guard !isArchiveCheckRunning, searchTask == nil, !isLoading,
+              !(background && isExportingFavoritesPDF),
               currentDate() >= nextArchiveBatchAt else { return }
+        let generation = searchGeneration
         let favoriteIDs = Set(favorites.map(\.id))
         archiveAttempts = archiveAttempts.filter { favoriteIDs.contains($0.key) }
         isArchiveCheckRunning = true
@@ -588,7 +606,8 @@ final class VacancySearchViewModel: ObservableObject {
             nextArchiveBatchAt = currentDate().addingTimeInterval(Self.archiveBatchInterval)
         }
         for id in orderedIDs.prefix(batchSize) {
-            guard !Task.isCancelled, !(background && (isLoading || isExportingFavoritesPDF)) else { break }
+            guard !Task.isCancelled, searchTask == nil, !isLoading, generation == searchGeneration,
+                  !(background && isExportingFavoritesPDF) else { break }
             guard favoriteIndex(for: id, cachedIndices: &favoriteIndicesByID) != nil else { continue }
             archiveAttempts[id] = currentDate()
             let revision = resultsRevision
@@ -839,7 +858,7 @@ final class VacancySearchViewModel: ObservableObject {
         }.map(\.value)
     }
     private func timeMessage(_ date: Date) -> String {
-        let formatter = DateFormatter(); formatter.locale = Locale(identifier: "ru_RU"); formatter.timeStyle = .short; formatter.dateStyle = .none
+        let formatter = DateFormatter(); formatter.locale = Locale(identifier: "ru_RU"); formatter.timeStyle = .short; formatter.dateStyle = .short
         return "Обновлено: \(formatter.string(from: date))"
     }
 }

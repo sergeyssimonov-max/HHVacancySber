@@ -10,7 +10,7 @@ benchmark_sources="$benchmark_root/HHVacancySber/HHVacancySber"
 swiftc -O -parse-as-library -module-cache-path "$(dirname "$1")/module-cache" \
     "$benchmark_sources/HHModels.swift" "$benchmark_sources/HHAPIClient.swift" \
     "$benchmark_sources/HHAuthConfig.swift" "$benchmark_sources/AreaDirectoryStore.swift" \
-    "$benchmark_sources/ApplicationSupportLocation.swift" "$benchmark_sources/EmployerConfiguration.swift" \
+    "$benchmark_sources/VacancySnapshotStore.swift" "$benchmark_sources/ApplicationSupportLocation.swift" "$benchmark_sources/EmployerConfiguration.swift" \
     "$benchmark_sources/FavoriteVacancyStore.swift" "$benchmark_sources/FavoriteVacanciesPDFExporter.swift" \
     "$benchmark_sources/VacancyCollectionService.swift" "$benchmark_sources/VacancySearchViewModel.swift" \
     "$benchmark_root/scripts/benchmarks/RuntimeBenchmarks.swift" -o "$1"
