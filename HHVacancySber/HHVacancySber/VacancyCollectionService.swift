@@ -44,10 +44,21 @@ struct VacancyCollectionService: Sendable {
     static let perPage = 100
     private let client: any HHVacancyAPIClient
     private let now: @Sendable () -> Date
+    private let maximumRequests: Int
+    private let maximumDuration: TimeInterval
+    private let uptime: @Sendable () -> TimeInterval
 
-    init(client: any HHVacancyAPIClient, now: @escaping @Sendable () -> Date = { Date() }) {
+    // 47 employers × 20 accessible pages × two completeness passes = 1,880.
+    // 2,000 leaves room for probes/splits; exceeding it is explicitly incomplete.
+    // At one second pacing this is roughly 34 minutes without retries; allow one hour.
+    init(client: any HHVacancyAPIClient, now: @escaping @Sendable () -> Date = { Date() },
+         maximumRequests: Int = 2_000, maximumDuration: TimeInterval = 3_600,
+         uptime: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
         self.client = client
         self.now = now
+        self.maximumRequests = max(1, maximumRequests)
+        self.maximumDuration = max(0, maximumDuration)
+        self.uptime = uptime
     }
 
     typealias Progress = @MainActor @Sendable (VacancyCollectionProgress) -> Void
@@ -65,7 +76,7 @@ struct VacancyCollectionService: Sendable {
     }
 
     static func isTerminal(_ error: Error) -> Bool {
-        if error is CancellationError { return true }
+        if error is CancellationError || error is CollectionLimitError { return true }
         guard let error = error as? HHAPIError else { return false }
         switch error {
         case .requestFailed, .invalidResponse: return false
@@ -77,6 +88,21 @@ struct VacancyCollectionService: Sendable {
     func collect(
         employers: [EmployerConfigurationEntry],
         areas: AreaDirectoryIndex,
+        progress: @escaping Progress
+    ) async throws -> VacancyCollectionResult {
+        let run = CollectionRunClient(client: client, maximumRequests: maximumRequests,
+                                      maximumDuration: maximumDuration, uptime: uptime)
+        do {
+            return try await VacancyCollectionService(client: run, now: now).collectWithinBudget(
+                employers: employers, areas: areas, progress: progress
+            )
+        } catch let error as CollectionLimitError {
+            return await run.partialResult(employers: employers, error: error)
+        }
+    }
+
+    private func collectWithinBudget(
+        employers: [EmployerConfigurationEntry], areas: AreaDirectoryIndex,
         progress: @escaping Progress
     ) async throws -> VacancyCollectionResult {
         var all: [String: HHVacancySummary] = [:]
@@ -172,7 +198,8 @@ struct VacancyCollectionService: Sendable {
             }
         }
         let midpoint = Date(timeIntervalSince1970: floor(start.timeIntervalSince1970 + span / 2))
-        let secondStart = midpoint.addingTimeInterval(1)
+        // Overlap the boundary: deduplication is safer than a gap for fractional timestamps.
+        let secondStart = midpoint
         var combined = Outcome()
         for (lower, upper) in [(start, midpoint), (secondStart, end)] where lower <= upper {
             let child = replacing(request, dateFrom: lower, dateTo: upper)
@@ -304,7 +331,7 @@ struct VacancyCollectionService: Sendable {
         guard initialResponse.found > 0 else { return Outcome(values: result) }
         await progress(.init(employerName: employer.name, loadedCount: result.count, partition: partitionName(request)))
         let pages = min(
-            Int(ceil(Double(initialResponse.found) / Double(Self.perPage))),
+            (min(max(0, initialResponse.found), Self.maximumAccessibleResults) + Self.perPage - 1) / Self.perPage,
             Self.maximumAccessibleResults / Self.perPage
         )
         for page in stride(from: 1, to: pages, by: 1) {
@@ -353,5 +380,72 @@ struct VacancyCollectionService: Sendable {
             workFormat: request.workFormat,
             schedule: request.schedule
         )
+    }
+}
+
+
+private enum CollectionLimitError: LocalizedError {
+    case reached
+    var errorDescription: String? {
+        "Достигнут защитный предел запросов или времени сбора. Выгрузка неполная; повторите обновление позже."
+    }
+}
+
+/// Per-collection budget, shared by every recursive branch. It retains successful
+/// pages so unwinding a deep split cannot discard data on reaching the limit.
+private actor CollectionRunClient: HHVacancyAPIClient {
+    nonisolated let client: any HHVacancyAPIClient
+    private let maximumRequests: Int
+    private let deadline: TimeInterval
+    private let uptime: @Sendable () -> TimeInterval
+    private var requests = 0
+    private var values: [String: HHVacancySummary] = [:]
+    private var employerValues: [String: Set<String>] = [:]
+    private var expected: [String: Int] = [:]
+    private var dictionaries: HHVacancyDictionaries?
+
+    init(client: any HHVacancyAPIClient, maximumRequests: Int, maximumDuration: TimeInterval,
+         uptime: @escaping @Sendable () -> TimeInterval) {
+        self.client = client
+        self.maximumRequests = maximumRequests
+        self.uptime = uptime
+        deadline = uptime() + maximumDuration
+    }
+
+    private func reserve() throws {
+        try Task.checkCancellation()
+        guard requests < maximumRequests, uptime() < deadline else { throw CollectionLimitError.reached }
+        requests += 1
+    }
+
+    nonisolated func validateVacanciesAccess() throws { try client.validateVacanciesAccess() }
+    func searchVacancies(_ request: HHVacancySearchRequest) async throws -> HHVacancySearchResponse {
+        try reserve()
+        let response = try await client.searchVacancies(request)
+        try Task.checkCancellation()
+        if expected[request.employerID] == nil { expected[request.employerID] = response.found }
+        for item in response.items {
+            values[item.id] = item
+            employerValues[request.employerID, default: []].insert(item.id)
+        }
+        return response
+    }
+    func vacancyDictionaries() async throws -> HHVacancyDictionaries {
+        if let dictionaries { return dictionaries }
+        try reserve()
+        let result = try await client.vacancyDictionaries()
+        dictionaries = result
+        return result
+    }
+    func areaTree() async throws -> HHAreaNode { try reserve(); return try await client.areaTree() }
+    func vacancyDetails(id: String) async throws -> HHVacancyDetails {
+        try reserve(); return try await client.vacancyDetails(id: id)
+    }
+    func partialResult(employers: [EmployerConfigurationEntry], error: CollectionLimitError) -> VacancyCollectionResult {
+        // Conservatively mark the whole run: count equality alone is not proof of a full traversal.
+        .init(vacancies: Array(values.values), issues: employers.map {
+            .init(employerID: $0.id, employerName: $0.name, expected: expected[$0.id],
+                  actual: employerValues[$0.id]?.count ?? 0, failures: [error.localizedDescription])
+        })
     }
 }

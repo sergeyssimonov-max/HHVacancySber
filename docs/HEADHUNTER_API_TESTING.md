@@ -4,7 +4,7 @@ HHVacancySber uses `https://api.hh.ru` at runtime. Requests use the application 
 
 ## Automated tests
 
-The normal unit and UI suites are deterministic and do not send production traffic: unit tests use injected URL responses, while UI tests launch the DEBUG fixture composition selected by `HHVACANCYSBER_UI_TEST_MODE`.
+The normal unit and UI suites are deterministic and do not send production traffic: unit tests use injected URL responses, while UI tests launch the DEBUG fixture composition selected by `HHVACANCYSBER_UI_TEST_MODE`. The shared scheme sets this flag for TestAction as well, so the unit-test host window also uses fixtures and cannot start archive checks against real favorites. Explicit opt-in live tests still construct their own clients.
 
 Run the full local suite from the repository root:
 

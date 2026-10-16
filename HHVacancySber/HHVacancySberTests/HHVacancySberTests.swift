@@ -941,6 +941,276 @@ final class HHVacancySberTests: XCTestCase {
         }
     }
 
+    func testPathologicalRecursiveCollectionStopsAtBudget() async throws {
+        var requests = 0
+        let client = makeHTTPClient { _ in
+            requests += 1
+            return (200, [:], Data(#"{"items":[],"found":3000,"pages":20,"page":0,"per_page":100}"#.utf8))
+        }
+        let result = try await VacancyCollectionService(client: client, maximumRequests: 12).collect(
+            employers: [.init(id: "1", name: "One", comment: "test")],
+            areas: try AreaDirectoryIndex(root: Self.areaTree), progress: { _ in })
+        XCTAssertEqual(requests, 12)
+        XCTAssertFalse(result.isComplete)
+        XCTAssertTrue(result.issues.first?.message.contains("защитный предел") == true)
+    }
+
+    @MainActor
+    func testIncompleteRefreshPreservesPreviousCompleteSelection() async {
+        let client = EmployerScriptedClient(behaviors: ["1": .vacancies(150)])
+        let model = VacancySearchViewModel(apiClient: client,
+            employerStore: TestEmployerStore(entries: [.init(id: "1", name: "One", comment: "test")]),
+            areaStore: AreaDirectoryStore(fileURL: temporaryDirectory().appendingPathComponent("areas.json")))
+        await model.search()
+        let original = model.results.map(\.id)
+        await client.setBehavior(.failAfterFirstPage(150), employerID: "1")
+        await model.refreshVacancies()
+        XCTAssertEqual(model.results.map(\.id), original)
+        XCTAssertEqual(model.results.count, 150)
+        XCTAssertTrue(model.collectionWarning?.contains("Сохранена предыдущая полная выборка") == true)
+        await model.search()
+        XCTAssertEqual(model.results.map(\.id), original)
+        XCTAssertNil(model.collectionWarning)
+    }
+
+    @MainActor
+    func testFailedFavoriteSaveRetainsSnapshotAndRetriesWithoutAnotherMutation() async throws {
+        let clock = AuditClock()
+        let store = AuditFailingFavoriteStore()
+        let model = VacancySearchViewModel(apiClient: MockAPIClient(mode: .simple),
+            employerStore: TestEmployerStore(entries: [.init(id: "3529", name: "СБЕР", comment: "test")]),
+            areaStore: AreaDirectoryStore(fileURL: temporaryDirectory().appendingPathComponent("areas.json")),
+            favoritesStore: store, currentDate: { Date(timeIntervalSince1970: clock.now) })
+        await model.search()
+        model.toggleFavorite(id: "3529-vacancy")
+        await model.waitForPendingFavoritesSaves()
+        XCTAssertNotNil(model.favoritesWarning)
+        XCTAssertTrue(try store.load().isEmpty)
+        for _ in 0..<10 { await model.loadPersistenceIfNeeded() }
+        XCTAssertEqual(store.attempts, 1)
+        clock.advance(60)
+        await model.loadPersistenceIfNeeded()
+        await model.waitForPendingFavoritesSaves()
+        XCTAssertEqual(store.attempts, 2)
+        XCTAssertEqual(try store.load().map(\.id), ["3529-vacancy"])
+        XCTAssertNil(model.favoritesWarning)
+    }
+
+    @MainActor
+    func testArchiveStatusUpdatesVisibleResultsAndCompleteCache() async {
+        let model = VacancySearchViewModel(apiClient: MockAPIClient(mode: .archiveNotFound),
+            employerStore: TestEmployerStore(entries: [.init(id: "3529", name: "СБЕР", comment: "test")]),
+            areaStore: AreaDirectoryStore(fileURL: temporaryDirectory().appendingPathComponent("areas.json")))
+        await model.search()
+        let id = model.results[0].id
+        model.toggleFavorite(id: id)
+        await model.checkArchiveStatusesIfNeeded()
+        XCTAssertTrue(model.results[0].isArchived)
+        model.displayMode = .favorites
+        XCTAssertTrue(model.displayedResults[0].isArchived)
+        await model.search()
+        XCTAssertTrue(model.results[0].isArchived)
+        await model.waitForPendingFavoritesSaves()
+    }
+
+    func testMixedHTTPFailuresShareThreeAttemptBudget() async {
+        var requests = 0
+        let client = makeHTTPClient { _ in
+            requests += 1
+            if requests == 1 { throw URLError(.timedOut) }
+            return (requests == 2 ? 429 : 503, [:], Data(#"{"errors":[]}"#.utf8))
+        }
+        _ = try? await client.searchVacancies(.init(employerID: "1"))
+        XCTAssertEqual(requests, 3)
+    }
+
+    func testCooldownSurvivesExhaustedRetryBudgetAcrossClientsAndEndpoints() async throws {
+        let clock = AuditClock()
+        let gate = HHRequestGate(minimumDelayNanoseconds: 0, monotonicNow: { clock.now },
+                                 sleep: { clock.advance(Double($0) / 1e9) })
+        var times: [Double] = []
+        URLProtocolStub.handler = { request in
+            times.append(clock.now)
+            if times.count == 1 { return (429, ["Retry-After": "17"], Data()) }
+            return (200, [:], Data(#"{"experience":[],"work_format":[],"schedule":[]}"#.utf8))
+        }
+        let first = HTTPClientFactory.make(maximumRateLimitRetries: 0, requestGate: gate)
+        let second = HTTPClientFactory.make(requestGate: gate)
+        _ = try? await first.searchVacancies(.init(employerID: "1"))
+        _ = try await second.vacancyDictionaries()
+        XCTAssertEqual(times, [0, 17])
+    }
+
+    func testLongCooldownRejectsNewOperationsWithoutShorteningServerDelay() async throws {
+        for header in ["120", "9999999999999999999999999999999999999999"] {
+            let clock = AuditClock()
+            let gate = HHRequestGate(minimumDelayNanoseconds: 0, monotonicNow: { clock.now },
+                                     sleep: { clock.advance(Double($0) / 1e9) })
+            var requests = 0
+            URLProtocolStub.handler = { _ in requests += 1; return (429, ["Retry-After": header], Data()) }
+            let client = HTTPClientFactory.make(requestGate: gate)
+            _ = try? await client.searchVacancies(.init(employerID: "1"))
+            for _ in 0..<50 { _ = try? await client.vacancyDetails(id: "x") }
+            XCTAssertEqual(requests, 1)
+            clock.advance(119)
+            if header == "120" {
+                URLProtocolStub.handler = { _ in
+                    requests += 1
+                    XCTAssertGreaterThanOrEqual(clock.now, 120)
+                    return (200, [:], Data(#"{"items":[],"found":0,"pages":0,"page":0,"per_page":100}"#.utf8))
+                }
+                _ = try await client.searchVacancies(.init(employerID: "1"))
+                XCTAssertEqual(requests, 2)
+            }
+        }
+    }
+
+    func testLargeHTTPQueueHasOneSecondSpacingAndNoBurstAfterCooldown() async throws {
+        let clock = AuditClock()
+        let gate = HHRequestGate(monotonicNow: { clock.now }, sleep: { clock.advance(Double($0) / 1e9) })
+        await gate.imposeCooldown(seconds: 17)
+        var starts: [Double] = []
+        URLProtocolStub.handler = { _ in
+            starts.append(clock.now)
+            return (200, [:], Data(#"{"items":[],"found":0,"pages":0,"page":0,"per_page":100}"#.utf8))
+        }
+        let client = HTTPClientFactory.make(requestGate: gate)
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for id in 0..<100 { group.addTask { _ = try await client.searchVacancies(.init(employerID: String(id))) } }
+            try await group.waitForAll()
+        }
+        XCTAssertEqual(starts.count, 100)
+        XCTAssertEqual(starts.first, 17)
+        XCTAssertTrue(zip(starts, starts.dropFirst()).allSatisfy { $1 - $0 >= 1 })
+        let remaining = await gate.queuedRequestCount
+        XCTAssertEqual(remaining, 0)
+    }
+
+    func testCooldownWaitCancellationRetainsEmbargoAndReleasesGate() async throws {
+        let clock = AuditClock()
+        let entered = expectation(description: "cooldown wait")
+        let gate = HHRequestGate(minimumDelayNanoseconds: 0, monotonicNow: { clock.now }, sleep: { _ in
+            entered.fulfill()
+            try await Task.sleep(nanoseconds: 60_000_000_000)
+        })
+        await gate.imposeCooldown(seconds: 17)
+        let task = Task { try await gate.perform { XCTFail("embargo bypassed"); return 1 } }
+        await fulfillment(of: [entered], timeout: 2)
+        task.cancel()
+        do { _ = try await task.value; XCTFail("expected cancellation") } catch is CancellationError {} catch { XCTFail("\(error)") }
+        clock.advance(17)
+        let next = try await gate.perform { 2 }
+        XCTAssertEqual(next, 2)
+    }
+
+    func testOfflineStopsImmediatelyAndNextRequestCanRecover() async throws {
+        var requests = 0
+        URLProtocolStub.handler = { _ in
+            requests += 1
+            if requests == 1 { throw URLError(.notConnectedToInternet) }
+            return (200, [:], Data(#"{"items":[],"found":0,"pages":0,"page":0,"per_page":100}"#.utf8))
+        }
+        let client = HTTPClientFactory.make()
+        _ = try? await client.searchVacancies(.init(employerID: "1"))
+        XCTAssertEqual(requests, 1)
+        _ = try await client.searchVacancies(.init(employerID: "1"))
+        XCTAssertEqual(requests, 2)
+    }
+
+    func testCollectorBudgetRetainsPagesAndMarksUnvisitedEmployersIncomplete() async throws {
+        let client = EmployerScriptedClient(behaviors: ["1": .vacancies(350), "2": .vacancies(1)])
+        let result = try await VacancyCollectionService(client: client, maximumRequests: 2).collect(
+            employers: ["1", "2"].map { .init(id: $0, name: $0, comment: "test") },
+            areas: try AreaDirectoryIndex(root: Self.areaTree), progress: { _ in })
+        XCTAssertEqual(result.vacancies.count, 200)
+        XCTAssertFalse(result.isComplete)
+        XCTAssertEqual(result.issues.map(\.employerID), ["1", "2"])
+        let requests = await client.requestedEmployerIDs.count
+        XCTAssertEqual(requests, 2)
+    }
+
+    func testCollectorDurationBudgetUsesMonotonicClock() async throws {
+        let client = EmployerScriptedClient(behaviors: ["1": .vacancies(350)])
+        let clock = AuditClock()
+        let result = try await VacancyCollectionService(client: client, maximumDuration: 10, uptime: { clock.now }).collect(
+            employers: [.init(id: "1", name: "One", comment: "test")],
+            areas: try AreaDirectoryIndex(root: Self.areaTree), progress: { _ in clock.advance(10) })
+        XCTAssertEqual(result.vacancies.count, 100)
+        XCTAssertFalse(result.isComplete)
+        let requests = await client.requestedEmployerIDs.count
+        XCTAssertEqual(requests, 1)
+    }
+
+    func testAreaAccessRestrictionCannotFallBackAndContinueCollection() async throws {
+        let file = temporaryDirectory().appendingPathComponent("areas.json")
+        let date = Date(timeIntervalSince1970: 1_788_200_000)
+        _ = try await AreaDirectoryStore(fileURL: file, now: { date }).load(using: MockAPIClient(mode: .simple))
+        for cached in [true, false] {
+            let client = makeHTTPClient { _ in (403, [:], Data()) }
+            let store = AreaDirectoryStore(fileURL: cached ? file : file.appendingPathExtension("missing"),
+                                           now: { date.addingTimeInterval(AreaDirectoryStore.defaultTTL + 1) })
+            do { _ = try await store.load(using: client); XCTFail("expected forbidden") }
+            catch let error as HHAPIError { XCTAssertEqual(error, .forbidden(requestID: nil)) }
+        }
+    }
+
+    @MainActor
+    func testArchiveBatchesAndActivationDoNotRepeatFailedChecks() async {
+        let clock = AuditClock()
+        let client = MockAPIClient(mode: .archiveRecoverableFailure)
+        let records = (0..<45).map { index -> FavoriteVacancyRecord in
+            let item = summary(id: "3529-\(index)-fail", areaID: "1", areaName: "Москва")
+            let result = VacancySearchResult(id: item.id, summary: item,
+                details: .init(id: item.id, name: item.name, employer: item.employer, area: item.area,
+                               salary: nil, alternateURL: nil, description: nil))
+            return .init(result: result, favoritedAt: .distantPast, updatedAt: .distantPast, archiveCheckedAt: nil)
+        }
+        let model = VacancySearchViewModel(apiClient: client, employerStore: TestEmployerStore(entries: []),
+            favoritesStore: InMemoryFavoriteVacancyStore(favorites: records),
+            currentDate: { Date(timeIntervalSince1970: clock.now) })
+        await model.checkArchiveStatusesIfNeeded(background: true)
+        for _ in 0..<20 { await model.checkArchiveStatusesIfNeeded(background: true) }
+        var ids = await client.requestedDetailIDs
+        XCTAssertEqual(ids.count, 20)
+        clock.advance(1_801)
+        await model.checkArchiveStatusesIfNeeded(background: true)
+        ids = await client.requestedDetailIDs
+        XCTAssertEqual(ids.count, 40)
+        XCTAssertEqual(Set(ids).count, 40, "Unvisited tail precedes entries that become due again")
+        clock.advance(60)
+        await model.checkArchiveStatusesIfNeeded(background: true)
+        ids = await client.requestedDetailIDs
+        XCTAssertEqual(ids.count, 60)
+        XCTAssertEqual(Set(ids).count, 45)
+    }
+
+    @MainActor
+    func testCardAndArchiveJoinOneDetailRequestWithIndependentCancellation() async {
+        let entered = expectation(description: "detail started")
+        let release = TestAsyncSignal()
+        let client = MockAPIClient(mode: .simple, beforeFirstDetailResponse: { entered.fulfill(); await release.wait() })
+        let model = VacancySearchViewModel(apiClient: client,
+            employerStore: TestEmployerStore(entries: [.init(id: "3529", name: "СБЕР", comment: "test")]),
+            areaStore: AreaDirectoryStore(fileURL: temporaryDirectory().appendingPathComponent("areas.json")))
+        await model.search()
+        model.toggleFavorite(id: "3529-vacancy")
+        let card = Task { await model.loadVacancyDetails(id: "3529-vacancy") }
+        await fulfillment(of: [entered], timeout: 2)
+        let archive = Task { await model.checkArchiveStatusesIfNeeded() }
+        // Main actor scheduling barrier: archive joins before the subscriber cancellation.
+        await Task.yield()
+        card.cancel()
+        await card.value
+        await release.signal()
+        await archive.value
+        let count = await client.detailRequestCount
+        XCTAssertEqual(count, 1)
+        XCTAssertNotNil(model.favorites.first?.archiveCheckedAt)
+        await model.loadVacancyDetails(id: "3529-vacancy")
+        let after = await client.detailRequestCount
+        XCTAssertEqual(after, 1, "Archive response supplies the card description")
+    }
+
     func testRateLimitWaitPreventsQueuedRequestsFromOvertakingRetry() async throws {
         let entered = expectation(description: "Retry owns gate")
         let release = TestAsyncSignal()
@@ -2926,15 +3196,20 @@ final class HHVacancySberTests: XCTestCase {
 
     @MainActor
     func testFavoritePDFSnapshotKeepsLocalStateWhileArchiveChecksUpdateFavorites() async {
-        let blocked = expectation(description: "enrichment suspended")
-        let client = SuspendedEnrichmentClient(onFirstRequest: { blocked.fulfill() })
+        let blocked = expectation(description: "export holds prepared snapshot")
+        let releaseExport = TestAsyncSignal()
+        let client = SuspendedEnrichmentClient(onFirstRequest: {})
+        // Finish the failed enrichment before archive refresh: identical requests now
+        // share a flight, so requiring a second response while holding the first deadlocks the fixture.
+        await client.resumeFirstRequest()
         let exporter = PDFEnrichmentExporter()
+        exporter.beforeCompletion = { blocked.fulfill(); await releaseExport.wait() }
         let model = await snapshotExportModel(client: client, exporter: exporter)
         let export = Task { await model.exportFavoriteVacanciesPDF() }
         await fulfillment(of: [blocked], timeout: 2)
         await model.checkArchiveStatusesIfNeeded()
         XCTAssertTrue(model.favorites.allSatisfy(\.isArchived))
-        await client.resumeFirstRequest()
+        await releaseExport.signal()
         await export.value
         XCTAssertEqual(exporter.snapshots.count, 1)
         XCTAssertEqual(exporter.snapshots.first?.map(\.id), ["pending", "full"])
@@ -3262,7 +3537,8 @@ private struct CancelledAreaClient: HHVacancyAPIClient {
 
 private actor EmployerScriptedClient: HHVacancyAPIClient {
     enum Behavior: Sendable { case vacancies(Int), failAfterFirstPage(Int), failure, forbidden }
-    let behaviors: [String: Behavior]
+    var behaviors: [String: Behavior]
+    func setBehavior(_ value: Behavior, employerID: String) { behaviors[employerID] = value }
     private(set) var requestedEmployerIDs: [String] = []
     init(behaviors: [String: Behavior]) { self.behaviors = behaviors }
     nonisolated func validateVacanciesAccess() throws {}
@@ -3446,9 +3722,11 @@ private struct FixedTokenProvider: HHAccessTokenProviding {
 private final class PDFEnrichmentExporter: FavoriteVacanciesPDFExporting {
     var snapshots: [[VacancySearchResult]] = []
     var onExport: (() -> Void)?
+    var beforeCompletion: (@MainActor () async -> Void)?
     func export(vacancies: [VacancySearchResult], progress: @escaping @MainActor @Sendable (FavoritePDFExportProgress) -> Void) async throws -> FavoritePDFExportOutcome {
         onExport?()
         snapshots.append(vacancies)
+        await beforeCompletion?()
         return .cancelled
     }
 }
@@ -3581,15 +3859,20 @@ private enum HTTPClientFactory {
         requestGate: HHRequestGate? = nil,
         retrySleep: @escaping @Sendable (UInt64) async throws -> Void = { _ in }
     ) -> HHAPIClient {
+        let clock = AuditClock()
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [URLProtocolStub.self]
         return HHAPIClient(
             session: URLSession(configuration: configuration),
             accessTokenProvider: FixedTokenProvider(),
-            requestGate: requestGate ?? HHRequestGate(minimumDelayNanoseconds: 0),
+            requestGate: requestGate ?? HHRequestGate(minimumDelayNanoseconds: 0,
+                monotonicNow: { clock.now }, sleep: { clock.advance(Double($0) / 1e9) }),
             maximumRateLimitRetries: maximumRateLimitRetries,
             maximumTransientRetries: maximumTransientRetries,
-            retrySleep: retrySleep
+            retrySleep: { value in
+                try await retrySleep(value)
+                clock.advance(Double(value) / 1e9)
+            }
         )
     }
 }
@@ -3733,5 +4016,28 @@ private final class LiveCancellationRun {
             }
             return response
         } catch { throw stop(after: error) }
+    }
+}
+
+
+/// A locked virtual monotonic clock; advancing it never waits on wall time.
+private final class AuditClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: TimeInterval = 0
+    var now: TimeInterval { lock.lock(); defer { lock.unlock() }; return value }
+    func advance(_ seconds: TimeInterval) { lock.lock(); defer { lock.unlock() }; value += seconds }
+}
+
+private final class AuditFailingFavoriteStore: FavoriteVacancyStoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    private var records: [FavoriteVacancyRecord] = []
+    var attempts: Int { lock.lock(); defer { lock.unlock() }; return count }
+    func load() throws -> [FavoriteVacancyRecord] { lock.lock(); defer { lock.unlock() }; return records }
+    func save(_ favorites: [FavoriteVacancyRecord]) throws {
+        lock.lock(); defer { lock.unlock() }
+        count += 1
+        if count == 1 { throw CocoaError(.fileWriteOutOfSpace) }
+        records = favorites
     }
 }

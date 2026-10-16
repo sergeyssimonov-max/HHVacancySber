@@ -739,6 +739,15 @@ struct VacancySearchResult: Identifiable {
         details.description?.nilIfBlank != nil
     }
 
+    func updatingArchiveStatus(_ archived: Bool, checkedAt: Date) -> VacancySearchResult {
+        VacancySearchResult(
+            id: id, summary: summary, details: details, location: location,
+            isDetailLoaded: isDetailLoaded, isDetailLoading: isDetailLoading,
+            detailErrorMessage: detailErrorMessage, persistedSalaryText: persistedSalaryText,
+            isArchived: archived, archiveCheckedAt: checkedAt, exportDataNotice: exportDataNotice
+        )
+    }
+
     func updatingDetailState(
         isLoading: Bool,
         errorMessage: String?

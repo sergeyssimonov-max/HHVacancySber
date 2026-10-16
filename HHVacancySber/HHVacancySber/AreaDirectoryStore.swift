@@ -132,6 +132,7 @@ struct AreaDirectoryStore: @unchecked Sendable {
         } catch is CancellationError {
             throw CancellationError()
         } catch {
+            if VacancyCollectionService.isTerminal(error) { throw error }
             if let cachedIndex {
                 return AreaDirectorySnapshot(index: cachedIndex, warning: "Используется устаревший кэш регионов: \(error.localizedDescription)")
             }

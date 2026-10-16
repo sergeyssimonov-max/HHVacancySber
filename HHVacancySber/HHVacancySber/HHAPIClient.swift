@@ -78,6 +78,15 @@ protocol HHVacancyAPIClient: Sendable {
 
 struct HHAPIClient: HHVacancyAPIClient, Sendable {
     private static let baseURL = URL(string: "https://api.hh.ru")!
+    // A stalled response must not own the global queue for URLSession's default seven days.
+    static let defaultSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 30
+        configuration.timeoutIntervalForResource = 120
+        configuration.waitsForConnectivity = false
+        return URLSession(configuration: configuration)
+    }()
+    static let maximumHTTPAttempts = 3
     private static let contact = "sergeyssimonov-max@users.noreply.github.com"
     private let session: URLSession
     private let accessTokenProvider: HHAccessTokenProviding
@@ -88,7 +97,7 @@ struct HHAPIClient: HHVacancyAPIClient, Sendable {
     private let retryNow: @Sendable () -> Date
 
     init(
-        session: URLSession = .shared,
+        session: URLSession = HHAPIClient.defaultSession,
         accessTokenProvider: HHAccessTokenProviding = HHDefaultAccessTokenProvider(),
         requestGate: HHRequestGate = .shared,
         maximumRateLimitRetries: Int = 2,
@@ -107,7 +116,7 @@ struct HHAPIClient: HHVacancyAPIClient, Sendable {
 
     func searchVacancies(_ search: HHVacancySearchRequest) async throws -> HHVacancySearchResponse {
         try validateVacanciesAccess()
-        guard (1...100).contains(search.perPage), search.page >= 0, search.page * search.perPage < 2_000 else {
+        guard (1...100).contains(search.perPage), search.page >= 0, search.page <= 1_999 / search.perPage else {
             throw HHAPIError.invalidURL
         }
         var items = [
@@ -160,7 +169,7 @@ struct HHAPIClient: HHVacancyAPIClient, Sendable {
     }
 
     private func makeRequest(url: URL) -> URLRequest {
-        var request = URLRequest(url: url)
+        var request = URLRequest(url: url, timeoutInterval: 30)
         request.httpMethod = "GET"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         let agent = "HHVacancySber/1.0 (\(Self.contact))"
@@ -175,6 +184,12 @@ struct HHAPIClient: HHVacancyAPIClient, Sendable {
     // A server delay above the automatic-wait ceiling stops the operation;
     // clamping it and retrying early would disregard Retry-After.
     static func rateLimitDelay(header: String?, now: Date, attempt: Int) -> TimeInterval? {
+        let delay = serverDelay(header: header, now: now, attempt: attempt)
+        return delay.isFinite && delay <= 60 ? delay : nil
+    }
+
+    /// Parse without truncating the server's embargo to the automatic retry ceiling.
+    static func serverDelay(header: String?, now: Date, attempt: Int) -> TimeInterval {
         let backoff = attempt == 0 ? 1.0 : 2.0
         guard let header else { return backoff }
         let value = header.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -190,7 +205,6 @@ struct HHAPIClient: HHVacancyAPIClient, Sendable {
             seconds = formatter.date(from: value).map { max(0, $0.timeIntervalSince(now)) }
         }
         guard let seconds else { return backoff }
-        guard seconds.isFinite, seconds <= 60 else { return nil }
         return max(backoff, seconds)
     }
 
@@ -205,20 +219,30 @@ struct HHAPIClient: HHVacancyAPIClient, Sendable {
         try await requestGate.perform {
             var retryCount = 0
             var transientRetryCount = 0
+            var attempts = 0
             while true {
                 try Task.checkCancellation()
+                try await requestGate.waitForCooldown()
+                attempts += 1
                 let data: Data
                 let response: URLResponse
                 do { (data, response) = try await session.data(for: request) }
                 catch let error as URLError where error.code == .cancelled { throw CancellationError() }
                 catch let error as URLError where Self.transientURLErrorCodes.contains(error.code)
-                    && transientRetryCount < maximumTransientRetries {
+                    && transientRetryCount < maximumTransientRetries && attempts < Self.maximumHTTPAttempts {
                     let delay = Self.rateLimitDelay(header: nil, now: retryNow(), attempt: transientRetryCount) ?? 1
                     transientRetryCount += 1
                     try await retrySleep(UInt64(delay * 1_000_000_000))
                     continue
                 }
                 guard let http = response as? HTTPURLResponse else { throw HHAPIError.invalidResponse }
+                if http.statusCode == 429 || (Self.transientStatusCodes.contains(http.statusCode)
+                    && http.value(forHTTPHeaderField: "Retry-After") != nil) {
+                    await requestGate.imposeCooldown(seconds: Self.serverDelay(
+                        header: http.value(forHTTPHeaderField: "Retry-After"), now: retryNow(), attempt: retryCount
+                    ))
+                }
+                try Task.checkCancellation()
                 if (200...299).contains(http.statusCode) { return data }
                 let body = try? JSONDecoder().decode(HHErrorResponse.self, from: data)
                 if body?.isCaptchaRequired == true { throw HHAPIError.captchaRequired(requestID: body?.requestID) }
@@ -227,14 +251,14 @@ struct HHAPIClient: HHVacancyAPIClient, Sendable {
                 case 403: throw HHAPIError.forbidden(requestID: body?.requestID)
                 case 429:
                     let header = http.value(forHTTPHeaderField: "Retry-After")
-                    guard retryCount < maximumRateLimitRetries,
+                    guard retryCount < maximumRateLimitRetries, attempts < Self.maximumHTTPAttempts,
                           let delay = Self.rateLimitDelay(header: header, now: retryNow(), attempt: retryCount) else {
                         throw HHAPIError.rateLimited(retryAfterSeconds: header.flatMap(Int.init))
                     }
                     retryCount += 1
                     // Keep the shared gate while waiting: queued work cannot overtake a retry.
                     try await retrySleep(UInt64(delay * 1_000_000_000))
-                case let code where Self.transientStatusCodes.contains(code) && transientRetryCount < maximumTransientRetries:
+                case let code where Self.transientStatusCodes.contains(code) && transientRetryCount < maximumTransientRetries && attempts < Self.maximumHTTPAttempts:
                     // Same Retry-After policy as 429: a longer server delay ends the request.
                     guard let delay = Self.rateLimitDelay(
                         header: http.value(forHTTPHeaderField: "Retry-After"),
@@ -255,9 +279,13 @@ struct HHAPIClient: HHVacancyAPIClient, Sendable {
 
 actor HHRequestGate {
     static let shared = HHRequestGate()
-    static let defaultMinimumDelayNanoseconds: UInt64 = 250_000_000
+    // Application policy, not an official hh.ru quota. Also bounds the retry backoff floor.
+    static let defaultMinimumDelayNanoseconds: UInt64 = 1_000_000_000
     private let delay: UInt64
-    private var lastFinishedAt: UInt64?
+    private let monotonicNow: @Sendable () -> TimeInterval
+    private let sleep: @Sendable (UInt64) async throws -> Void
+    private var cooldownUntil: TimeInterval = 0
+    private var lastFinishedAt: TimeInterval?
     private var isPerforming = false
     private struct Waiter {
         let id: UUID
@@ -266,20 +294,48 @@ actor HHRequestGate {
     private var waiters: [Waiter] = []
     var queuedRequestCount: Int { waiters.count }
 
-    init(minimumDelayNanoseconds: UInt64 = defaultMinimumDelayNanoseconds) { delay = minimumDelayNanoseconds }
+    init(
+        minimumDelayNanoseconds: UInt64 = defaultMinimumDelayNanoseconds,
+        monotonicNow: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+        sleep: @escaping @Sendable (UInt64) async throws -> Void = { try await Task.sleep(nanoseconds: $0) }
+    ) {
+        delay = minimumDelayNanoseconds
+        self.monotonicNow = monotonicNow
+        self.sleep = sleep
+    }
+
+    func imposeCooldown(seconds: TimeInterval) {
+        cooldownUntil = max(cooldownUntil, monotonicNow() + max(0, seconds))
+    }
+
+    func waitForCooldown() async throws {
+        while true {
+            try Task.checkCancellation()
+            let remaining = cooldownUntil - monotonicNow()
+            guard remaining > 0 else { return }
+            // Fail promptly but retain the embargo. A new operation cannot bypass it.
+            guard remaining.isFinite, remaining <= 60 else {
+                let seconds = remaining.isFinite && remaining < Double(Int.max) ? Int(ceil(remaining)) : nil
+                throw HHAPIError.rateLimited(retryAfterSeconds: seconds)
+            }
+            try await sleep(UInt64(ceil(remaining * 1_000_000_000)))
+        }
+    }
 
     func perform<T: Sendable>(_ operation: @Sendable () async throws -> T) async throws -> T {
         try await acquire()
         defer {
-            lastFinishedAt = DispatchTime.now().uptimeNanoseconds
+            lastFinishedAt = monotonicNow()
             release()
         }
         try Task.checkCancellation()
         if let lastFinishedAt {
-            let now = DispatchTime.now().uptimeNanoseconds
-            let elapsed = now > lastFinishedAt ? now - lastFinishedAt : 0
-            if elapsed < delay { try await Task.sleep(nanoseconds: delay - elapsed) }
+            let elapsed = max(0, monotonicNow() - lastFinishedAt)
+            let remaining = Double(delay) / 1_000_000_000 - elapsed
+            if remaining > 0 { try await sleep(UInt64(ceil(remaining * 1_000_000_000))) }
         }
+        try await waitForCooldown()
+        try Task.checkCancellation()
         return try await operation()
     }
 

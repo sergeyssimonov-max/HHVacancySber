@@ -9,7 +9,7 @@ struct ContentView: View {
     @ObservedObject private var viewModel: VacancySearchViewModel
     @Environment(\.scenePhase) private var scenePhase
     private let archiveCheckTimer = Timer.publish(
-        every: VacancySearchViewModel.archiveCheckInterval,
+        every: VacancySearchViewModel.archiveBatchInterval,
         on: .main,
         in: .common
     ).autoconnect()
@@ -29,14 +29,14 @@ struct ContentView: View {
         )
         .task {
             await viewModel.loadPersistenceIfNeeded()
-            await viewModel.checkArchiveStatusesIfNeeded()
+            await viewModel.checkArchiveStatusesIfNeeded(background: true)
         }
         .onReceive(archiveCheckTimer) { _ in
-            Task { await viewModel.checkArchiveStatusesIfNeeded() }
+            Task { await viewModel.checkArchiveStatusesIfNeeded(background: true) }
         }
         .onChange(of: scenePhase) { phase in
             guard phase == .active else { return }
-            Task { await viewModel.checkArchiveStatusesIfNeeded() }
+            Task { await viewModel.checkArchiveStatusesIfNeeded(background: true) }
         }
     }
 }

@@ -24,6 +24,8 @@ private struct VacancySearchCache {
 final class VacancySearchViewModel: ObservableObject {
     static let searchCacheTTL: TimeInterval = 10 * 60
     static let archiveCheckInterval: TimeInterval = 30 * 60
+    static let archiveBatchInterval: TimeInterval = 60
+    static let archiveBatchSize = 20
     private static let publicationDateParser = HHPublicationDateParser()
 
     @Published private(set) var results: [VacancySearchResult] = []
@@ -70,10 +72,64 @@ final class VacancySearchViewModel: ObservableObject {
     private var saveTask: Task<Void, Never>?
     private var pendingPersistenceSnapshot: (revision: Int, values: [FavoriteVacancyRecord])?
     private var persistenceRevision = 0
+    private var nextPersistenceRetryAt = Date.distantPast
     private var isPersistenceDriverRunning = false
     private var isFavoritesPersistenceWritable = false
     private var isArchiveCheckRunning = false
     private var resultsRevision = 0
+    private var archiveAttempts: [String: Date] = [:]
+    private var nextArchiveBatchAt = Date.distantPast
+    private final class DetailFlight: @unchecked Sendable {
+        let token = UUID()
+        private let lock = NSLock()
+        private var task: Task<Void, Never>?
+        private var waiters: [UUID: CheckedContinuation<HHVacancyDetails, Error>] = [:]
+        func addIfActive(_ id: UUID, _ continuation: CheckedContinuation<HHVacancyDetails, Error>) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            guard !waiters.isEmpty else { return false }
+            waiters[id] = continuation
+            return true
+        }
+        func add(_ id: UUID, _ continuation: CheckedContinuation<HHVacancyDetails, Error>) {
+            lock.lock(); waiters[id] = continuation; lock.unlock()
+        }
+        func setTask(_ value: Task<Void, Never>) {
+            lock.lock(); task = value; let empty = waiters.isEmpty; lock.unlock()
+            if empty { value.cancel() }
+        }
+        func cancel(_ id: UUID) {
+            lock.lock()
+            let waiter = waiters.removeValue(forKey: id)
+            let cancelledTask = waiters.isEmpty ? task : nil
+            lock.unlock()
+            cancelledTask?.cancel()
+            waiter?.resume(throwing: CancellationError())
+        }
+        func finish(_ result: Result<HHVacancyDetails, Error>) {
+            lock.lock(); let pending = waiters; waiters = [:]; task = nil; lock.unlock()
+            for waiter in pending.values { waiter.resume(with: result) }
+        }
+        func cancelAll() {
+            lock.lock(); let cancelledTask = task; lock.unlock()
+            cancelledTask?.cancel()
+            finish(.failure(CancellationError()))
+        }
+    }
+    private final class DetailSubscription: @unchecked Sendable {
+        let id = UUID()
+        private let lock = NSLock()
+        private var flight: DetailFlight?
+        private var cancelled = false
+        func attach(_ value: DetailFlight) {
+            lock.lock(); flight = value; let shouldCancel = cancelled; lock.unlock()
+            if shouldCancel { value.cancel(id) }
+        }
+        func cancel() {
+            lock.lock(); cancelled = true; let current = flight; lock.unlock()
+            current?.cancel(id)
+        }
+    }
+    private var detailFlights: [String: DetailFlight] = [:]
 
     init(
         apiClient: any HHVacancyAPIClient = HHAPIClient(),
@@ -93,7 +149,12 @@ final class VacancySearchViewModel: ObservableObject {
         self.currentDate = currentDate
     }
 
-    deinit { detailTask?.cancel(); saveTask?.cancel(); searchTask?.cancel(); favoritesExportTask?.cancel() }
+    deinit {
+        detailTask?.cancel(); saveTask?.cancel(); searchTask?.cancel(); favoritesExportTask?.cancel()
+        for flight in detailFlights.values {
+            flight.cancelAll()
+        }
+    }
 
     var canSearch: Bool { isPersistenceLoaded && !isLoading && searchTask == nil }
     var canCancelSearch: Bool { searchTask != nil && !isCancellingSearch }
@@ -169,7 +230,11 @@ final class VacancySearchViewModel: ObservableObject {
     }
 
     func loadPersistenceIfNeeded() async {
-        guard !isPersistenceLoaded else { return }
+        guard !isPersistenceLoaded else {
+            if pendingPersistenceSnapshot != nil, !isPersistenceDriverRunning,
+               currentDate() >= nextPersistenceRetryAt { startPersistenceDriver() }
+            return
+        }
         do {
             favorites = try favoritesStore.load().sorted { $0.favoritedAt > $1.favoritedAt }
             isFavoritesPersistenceWritable = true
@@ -222,6 +287,7 @@ final class VacancySearchViewModel: ObservableObject {
             results = cache.values
             hasSearched = true
             updatedAtMessage = timeMessage(cache.updatedAt)
+            collectionWarning = nil
             statusMessage = "Показана сохранённая полная выборка."
             return
         }
@@ -262,6 +328,12 @@ final class VacancySearchViewModel: ObservableObject {
                     location: areaSnapshot.index.location(for: summary)
                 )
             })
+            if !collection.isComplete, let cache, cache.issues.isEmpty {
+                collectionWarning = Self.makeCollectionWarning(for: collection.issues)?
+                    .replacingOccurrences(of: "Показаны полученные вакансии", with: "Сохранена предыдущая полная выборка")
+                statusMessage = "Обновление неполное; сохранена предыдущая полная выборка."
+                return
+            }
             resultsRevision += 1
             results = values
             cache = VacancySearchCache(values: values, updatedAt: now, issues: collection.issues)
@@ -279,7 +351,7 @@ final class VacancySearchViewModel: ObservableObject {
             statusMessage = "Поиск отменён."
         } catch {
             errorMessage = error.localizedDescription
-            statusMessage = "Поиск не завершён; сохранена предыдущая полная выборка."
+            statusMessage = "Поиск не завершён; сохранены ранее загруженные вакансии."
         }
     }
 
@@ -307,7 +379,7 @@ final class VacancySearchViewModel: ObservableObject {
         let current = results[index]
         results[index] = current.updatingDetailState(isLoading: true, errorMessage: nil)
         do {
-            let details = try await apiClient.vacancyDetails(id: id)
+            let details = try await sharedDetails(id: id)
             try Task.checkCancellation()
             guard revision == resultsRevision else { return }
             detailsCache[id] = details
@@ -336,7 +408,7 @@ final class VacancySearchViewModel: ObservableObject {
             if let cached = detailsCache[id] {
                 details = cached
             } else {
-                details = try await apiClient.vacancyDetails(id: id)
+                details = try await sharedDetails(id: id)
             }
             try Task.checkCancellation()
             detailsCache[id] = details
@@ -360,6 +432,58 @@ final class VacancySearchViewModel: ObservableObject {
         } catch {
             offlineDetailStates[id] = (false, "Не удалось загрузить описание: \(error.localizedDescription)")
         }
+    }
+
+    /// Every consumer joins one detail request. Cancelling a subscriber is immediate;
+    /// the network task is cancelled only when its last subscriber leaves.
+    private func sharedDetails(id: String, refresh: Bool = false) async throws -> HHVacancyDetails {
+        try Task.checkCancellation()
+        if !refresh, let cached = detailsCache[id] { return cached }
+        let subscriber = DetailSubscription()
+        // A refresh starts a new generation; its card must not join an older response.
+        let key = "\(resultsRevision):\(id)"
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<HHVacancyDetails, Error>) in
+                joinDetails(id: id, key: key, subscriber: subscriber, continuation: continuation)
+            }
+        } onCancel: {
+            subscriber.cancel()
+        }
+    }
+
+    private func joinDetails(id: String, key: String, subscriber: DetailSubscription,
+                             continuation: CheckedContinuation<HHVacancyDetails, Error>) {
+        if Task.isCancelled {
+            continuation.resume(throwing: CancellationError())
+            return
+        }
+        if let flight = detailFlights[key], flight.addIfActive(subscriber.id, continuation) {
+            subscriber.attach(flight)
+            return
+        }
+        let flight = DetailFlight()
+        flight.add(subscriber.id, continuation)
+        subscriber.attach(flight)
+        let token = flight.token
+        let client = apiClient
+        let task = Task { [weak self] in
+            let result: Result<HHVacancyDetails, Error>
+            do {
+                try Task.checkCancellation()
+                let details = try await client.vacancyDetails(id: id)
+                try Task.checkCancellation()
+                result = .success(details)
+            } catch { result = .failure(error) }
+            self?.finishDetails(key: key, token: token, result: result)
+        }
+        flight.setTask(task)
+        detailFlights[key] = flight
+    }
+
+    private func finishDetails(key: String, token: UUID, result: Result<HHVacancyDetails, Error>) {
+        guard let flight = detailFlights[key], flight.token == token else { return }
+        detailFlights[key] = nil
+        flight.finish(result)
     }
 
     private func apply(details: HHVacancyDetails, at index: Int) {
@@ -400,12 +524,17 @@ final class VacancySearchViewModel: ObservableObject {
         guard isFavoritesPersistenceWritable else { return }
         persistenceRevision += 1
         pendingPersistenceSnapshot = (persistenceRevision, favorites)
+        startPersistenceDriver()
+    }
+
+    private func startPersistenceDriver() {
         guard !isPersistenceDriverRunning else { return }
         isPersistenceDriverRunning = true
         saveTask = Task { [weak self] in await self?.runPersistenceDriver() }
     }
 
     private func runPersistenceDriver() async {
+        defer { isPersistenceDriverRunning = false; saveTask = nil }
         let store = favoritesStore
         while let pending = pendingPersistenceSnapshot {
             pendingPersistenceSnapshot = nil
@@ -417,20 +546,24 @@ final class VacancySearchViewModel: ObservableObject {
             } catch {
                 if pending.revision == persistenceRevision, pendingPersistenceSnapshot == nil {
                     favoritesWarning = "Не удалось сохранить избранное: \(error.localizedDescription)"
+                    pendingPersistenceSnapshot = pending
+                    nextPersistenceRetryAt = currentDate().addingTimeInterval(Self.archiveBatchInterval)
+                    return
                 }
             }
         }
-        isPersistenceDriverRunning = false
-        saveTask = nil
     }
 
     func waitForPendingFavoritesSaves() async {
         while let task = saveTask { await task.value }
     }
 
-    func checkArchiveStatusesIfNeeded() async {
+    func checkArchiveStatusesIfNeeded(background: Bool = false) async {
         await loadPersistenceIfNeeded()
-        guard !isArchiveCheckRunning else { return }
+        guard !isArchiveCheckRunning, !(background && (isLoading || isExportingFavoritesPDF)),
+              currentDate() >= nextArchiveBatchAt else { return }
+        let favoriteIDs = Set(favorites.map(\.id))
+        archiveAttempts = archiveAttempts.filter { favoriteIDs.contains($0.key) }
         isArchiveCheckRunning = true
         defer { isArchiveCheckRunning = false }
         let due = currentDate().addingTimeInterval(-Self.archiveCheckInterval)
@@ -439,30 +572,69 @@ final class VacancySearchViewModel: ObservableObject {
         var favoriteIndicesByID = makeFavoriteIndicesByID()
         let dueIDs: [String] = favorites.compactMap { favorite in
             guard (favorite.archiveCheckedAt ?? .distantPast) < due,
+                  (archiveAttempts[favorite.id] ?? .distantPast) < due,
                   seenIDs.insert(favorite.id).inserted else { return nil }
             return favorite.id
         }
-        for id in dueIDs {
+        // Oldest attempted entries first prevents a large list's tail from starving
+        // when the first batch becomes due again before the whole list was visited.
+        let orderedIDs = background ? dueIDs.enumerated().sorted { lhs, rhs in
+            let left = archiveAttempts[lhs.element] ?? .distantPast
+            let right = archiveAttempts[rhs.element] ?? .distantPast
+            return left == right ? lhs.offset < rhs.offset : left < right
+        }.map(\.element) : dueIDs
+        let batchSize = background ? Self.archiveBatchSize : dueIDs.count
+        if dueIDs.count > batchSize {
+            nextArchiveBatchAt = currentDate().addingTimeInterval(Self.archiveBatchInterval)
+        }
+        for id in orderedIDs.prefix(batchSize) {
+            guard !Task.isCancelled, !(background && (isLoading || isExportingFavoritesPDF)) else { break }
+            guard favoriteIndex(for: id, cachedIndices: &favoriteIndicesByID) != nil else { continue }
+            archiveAttempts[id] = currentDate()
+            let revision = resultsRevision
             do {
-                let details = try await apiClient.vacancyDetails(id: id)
+                let details = try await sharedDetails(id: id, refresh: true)
+                try Task.checkCancellation()
+                if revision == resultsRevision { detailsCache[id] = details }
                 guard let archived = details.archived,
                       let index = favoriteIndex(for: id, cachedIndices: &favoriteIndicesByID) else { continue }
-                favorites[index].updateArchiveStatus(archived, checkedAt: currentDate())
+                let checkedAt = currentDate()
+                favorites[index].updateArchiveStatus(archived, checkedAt: checkedAt)
+                updateResultArchiveStatus(id: id, archived: archived, checkedAt: checkedAt, revision: revision)
                 didUpdate = true
             } catch let error as HHAPIError where error.isNotFound {
                 // A vacancy removed from hh.ru is no longer available to apply for.
                 guard let index = favoriteIndex(for: id, cachedIndices: &favoriteIndicesByID) else { continue }
-                favorites[index].updateArchiveStatus(true, checkedAt: currentDate())
+                let checkedAt = currentDate()
+                favorites[index].updateArchiveStatus(true, checkedAt: checkedAt)
+                updateResultArchiveStatus(id: id, archived: true, checkedAt: checkedAt, revision: revision)
                 didUpdate = true
             } catch is CancellationError {
+                archiveAttempts[id] = nil
                 break
             } catch let error as HHAPIError where shouldStopArchiveCheckCycle(after: error) {
+                nextArchiveBatchAt = currentDate().addingTimeInterval(Self.archiveCheckInterval)
+                break
+            } catch let error as URLError where error.code == .notConnectedToInternet {
+                nextArchiveBatchAt = currentDate().addingTimeInterval(Self.archiveBatchInterval)
                 break
             } catch {
                 continue
             }
         }
         if didUpdate { persistFavorites() }
+    }
+
+    private func updateResultArchiveStatus(id: String, archived: Bool, checkedAt: Date, revision: Int) {
+        guard revision == resultsRevision else { return }
+        if let index = results.firstIndex(where: { $0.id == id }) {
+            results[index] = results[index].updatingArchiveStatus(archived, checkedAt: checkedAt)
+        }
+        if let previous = cache, let index = previous.values.firstIndex(where: { $0.id == id }) {
+            var values = previous.values
+            values[index] = values[index].updatingArchiveStatus(archived, checkedAt: checkedAt)
+            cache = VacancySearchCache(values: values, updatedAt: previous.updatedAt, issues: previous.issues)
+        }
     }
 
     private func makeFavoriteIndicesByID() -> [String: Int] {
@@ -609,7 +781,7 @@ final class VacancySearchViewModel: ObservableObject {
             if let cached = detailsCache[source.id] {
                 details = cached
             } else {
-                details = try await apiClient.vacancyDetails(id: source.id)
+                details = try await sharedDetails(id: source.id)
             }
             try Task.checkCancellation()
             detailsCache[source.id] = details
