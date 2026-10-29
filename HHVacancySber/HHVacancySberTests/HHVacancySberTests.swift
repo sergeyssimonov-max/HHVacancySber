@@ -2318,6 +2318,15 @@ final class HHVacancySberTests: XCTestCase {
     }
 
     @MainActor
+    private func waitForTestCondition(_ condition: () async -> Bool) async -> Bool {
+        for _ in 0..<1_000 {
+            if await condition() { return true }
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        return await condition()
+    }
+
+    @MainActor
     func testCompletedRefreshIgnoresDetailResponseFromPreviousResults() async {
         let client = MockAPIClient(mode: .delayedArchive)
         let model = VacancySearchViewModel(
@@ -2328,7 +2337,11 @@ final class HHVacancySberTests: XCTestCase {
         await model.search()
 
         let detail = Task { await model.loadVacancyDetails(id: "3529-vacancy") }
-        while await client.detailRequestCount == 0 { await Task.yield() }
+        guard await waitForTestCondition({ await client.detailRequestCount > 0 }) else {
+            detail.cancel()
+            XCTFail("Запрос деталей не начался за отведённое время")
+            return
+        }
         await model.refreshVacancies()
         await detail.value
 
@@ -2348,7 +2361,11 @@ final class HHVacancySberTests: XCTestCase {
         let initialRequestCount = await client.searchRequestCount
         await client.enableDelayedSearchFailure()
         let refresh = Task { await model.refreshVacancies() }
-        while await client.searchRequestCount == initialRequestCount { await Task.yield() }
+        guard await waitForTestCondition({ await client.searchRequestCount > initialRequestCount }) else {
+            refresh.cancel()
+            XCTFail("Обновление выборки не началось за отведённое время")
+            return
+        }
         await model.loadVacancyDetails(id: "3529-vacancy")
         await refresh.value
 
@@ -2691,12 +2708,19 @@ final class HHVacancySberTests: XCTestCase {
 
         model.startRefresh()
         XCTAssertFalse(model.canSearch)
-        while await client.searchRequestCount == initialRequestCount { await Task.yield() }
+        guard await waitForTestCondition({ await client.searchRequestCount > initialRequestCount }) else {
+            model.cancelSearch()
+            XCTFail("Обновление выборки не началось за отведённое время")
+            return
+        }
         XCTAssertTrue(model.canCancelSearch)
         model.cancelSearch()
         XCTAssertTrue(model.isCancellingSearch)
         XCTAssertFalse(model.canCancelSearch)
-        while !model.canSearch { await Task.yield() }
+        guard await waitForTestCondition({ model.canSearch }) else {
+            XCTFail("Отменённое обновление не завершилось за отведённое время")
+            return
+        }
 
         XCTAssertEqual(model.statusMessage, "Поиск отменён.")
         XCTAssertNil(model.errorMessage)
