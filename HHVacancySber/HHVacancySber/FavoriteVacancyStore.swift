@@ -52,6 +52,7 @@ struct FavoriteVacancyRecord: Codable, Equatable, Identifiable, Sendable {
         descriptionHTML = result.htmlDescription.nilIfBlank ?? descriptionHTML
         if result.isDetailLoaded { detailsSnapshot = result.details }
         isArchived = result.isArchived
+        archiveCheckedAt = result.archiveCheckedAt ?? archiveCheckedAt
         guard previous != self else { return false }
         updatedAt = date
         return true
@@ -96,6 +97,23 @@ struct FavoriteVacancyRecord: Codable, Equatable, Identifiable, Sendable {
             persistedSalaryText: salaryText,
             isArchived: isArchived,
             archiveCheckedAt: archiveCheckedAt
+        )
+    }
+
+    /// Combine the current search row with the persisted favorite's richer data.
+    func merging(_ current: VacancySearchResult) -> VacancySearchResult {
+        let saved = searchResult
+        let useCurrentDetails = current.isDetailLoaded || current.hasFullDescription
+        let details = useCurrentDetails ? current.details : saved.details
+        let useCurrentStatus = (current.archiveCheckedAt ?? .distantPast) > (archiveCheckedAt ?? .distantPast)
+        return VacancySearchResult(
+            id: current.id, summary: current.summary, details: details, location: current.location,
+            isDetailLoaded: current.isDetailLoaded || (!useCurrentDetails && saved.isDetailLoaded),
+            isDetailLoading: current.isDetailLoading, detailErrorMessage: current.detailErrorMessage,
+            persistedSalaryText: current.persistedSalaryText ?? salaryText,
+            isArchived: useCurrentStatus ? current.isArchived : isArchived,
+            archiveCheckedAt: useCurrentStatus ? current.archiveCheckedAt : archiveCheckedAt,
+            exportDataNotice: current.exportDataNotice
         )
     }
 
@@ -157,9 +175,33 @@ private struct FavoriteVacancyContainer: Codable {
 
 private struct ContainerVersion: Decodable { let version: Int }
 
+struct FavoriteLoadResult: Sendable {
+    let records: [FavoriteVacancyRecord]
+    let warning: String?
+}
+
 protocol FavoriteVacancyStoring: Sendable {
     func load() throws -> [FavoriteVacancyRecord]
+    func loadWithWarning() throws -> FavoriteLoadResult
     func save(_ favorites: [FavoriteVacancyRecord]) throws
+}
+
+extension FavoriteVacancyStoring {
+    func loadWithWarning() throws -> FavoriteLoadResult { .init(records: try load(), warning: nil) }
+}
+
+/// Serialize foreground termination flush with the background writer.
+final class SerializedFavoriteStore: FavoriteVacancyStoring, @unchecked Sendable {
+    private let store: any FavoriteVacancyStoring
+    private let lock = NSLock()
+    init(_ store: any FavoriteVacancyStoring) { self.store = store }
+    func load() throws -> [FavoriteVacancyRecord] { try loadWithWarning().records }
+    func loadWithWarning() throws -> FavoriteLoadResult {
+        lock.lock(); defer { lock.unlock() }; return try store.loadWithWarning()
+    }
+    func save(_ favorites: [FavoriteVacancyRecord]) throws {
+        lock.lock(); defer { lock.unlock() }; try store.save(favorites)
+    }
 }
 
 enum FavoriteVacancyStoreError: LocalizedError, Equatable {
@@ -188,23 +230,39 @@ struct FavoriteVacancyStore: FavoriteVacancyStoring, @unchecked Sendable {
         }
     }
 
-    func load() throws -> [FavoriteVacancyRecord] {
+    func load() throws -> [FavoriteVacancyRecord] { try loadWithWarning().records }
+
+    func loadWithWarning() throws -> FavoriteLoadResult {
         let fileURL = try self.fileURL
-        guard fileManager.fileExists(atPath: fileURL.path) else { return [] }
+        guard fileManager.fileExists(atPath: fileURL.path) else { return .init(records: [], warning: nil) }
         let data = try Data(contentsOf: fileURL)
-        if data.trimmingJSONWhitespace == Data("[]".utf8) { return [] }
+        if data.trimmingJSONWhitespace == Data("[]".utf8) { return .init(records: [], warning: nil) }
         let decoder = JSONDecoder.favoritesDecoder
         guard let version = try? decoder.decode(ContainerVersion.self, from: data).version else {
+            _ = try CorruptFileBackup.copy(fileURL, fileManager: fileManager)
             throw FavoriteVacancyStoreError.corruptedFile
         }
         guard version == 1 || version == FavoriteVacancyContainer.currentVersion else {
             throw FavoriteVacancyStoreError.unsupportedVersion(version)
         }
-        guard let container = try? decoder.decode(FavoriteVacancyContainer.self, from: data) else {
+        struct Recovery: Decodable { let favorites: [RecoverableItem<FavoriteVacancyRecord>] }
+        guard let container = try? decoder.decode(Recovery.self, from: data) else {
+            _ = try CorruptFileBackup.copy(fileURL, fileManager: fileManager)
             throw FavoriteVacancyStoreError.corruptedFile
         }
-        if version == 1 { try save(container.favorites) }
-        return container.favorites
+        var seen = Set<String>()
+        let records = container.favorites.compactMap(\.value).filter { seen.insert($0.id).inserted }
+        let skipped = container.favorites.count - records.count
+        var warning: String?
+        if skipped > 0 {
+            let backup = try CorruptFileBackup.copy(fileURL, fileManager: fileManager)
+            warning = "Избранное восстановлено частично: пропущено записей \(skipped). Копия исходного файла: \(backup.lastPathComponent)."
+        }
+        if version == 1 && skipped == 0 {
+            do { try save(records) }
+            catch { warning = "Не удалось обновить формат избранного: \(error.localizedDescription). Прочитанные записи сохранены в памяти." }
+        }
+        return .init(records: records, warning: warning)
     }
 
     func save(_ favorites: [FavoriteVacancyRecord]) throws {

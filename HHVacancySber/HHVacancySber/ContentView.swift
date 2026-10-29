@@ -31,6 +31,9 @@ struct ContentView: View {
             await viewModel.loadPersistenceIfNeeded()
             await viewModel.checkArchiveStatusesIfNeeded(background: true)
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+            viewModel.flushFavoritesOnTermination()
+        }
         .onReceive(archiveCheckTimer) { _ in
             Task { await viewModel.checkArchiveStatusesIfNeeded(background: true) }
         }

@@ -8,12 +8,6 @@ enum VacancyPDFDefaults {
     static let paperSize = NSSize(width: 595.28, height: 841.89)
     static let horizontalMargin: CGFloat = 40
     static let verticalMargin: CGFloat = 32
-    // NSLayoutManager and NSAttributedString.draw can differ by a fraction of a
-    // line in their final font-leading calculation. Reserve one body line so a
-    // glyph range accepted by pagination cannot be clipped during PDF drawing.
-    // Keep two compact body lines because a list marker and its wrapped text can
-    // use different final line fragments in the two AppKit layout paths.
-    static let paginationBottomSafetyMargin: CGFloat = 40
 
     static func personalFileName(
         vacancyID: String,
@@ -1215,8 +1209,27 @@ actor PDFExportWorker {
 final class FavoriteVacanciesPDFExporter: FavoriteVacanciesPDFExporting {
     nonisolated static let maximumPagesPerFile = 100
 
+    /// Pages from a document share the exact layout used to find their boundaries.
+    final class DocumentLayout: @unchecked Sendable {
+        let storage: NSTextStorage
+        let manager: NSLayoutManager
+        let container: NSTextContainer
+        init(_ text: NSAttributedString, width: CGFloat) {
+            storage = NSTextStorage(attributedString: text)
+            manager = NSLayoutManager()
+            container = NSTextContainer(size: NSSize(width: width, height: .greatestFiniteMagnitude))
+            container.lineFragmentPadding = 0
+            storage.addLayoutManager(manager)
+            manager.addTextContainer(container)
+            manager.ensureLayout(for: container)
+        }
+    }
+
     struct Page: @unchecked Sendable {
         let content: NSAttributedString
+        fileprivate let layout: DocumentLayout
+        fileprivate let glyphRange: NSRange
+        fileprivate let firstLineY: CGFloat
     }
 
     enum ExportError: LocalizedError {
@@ -1329,47 +1342,49 @@ final class FavoriteVacanciesPDFExporter: FavoriteVacanciesPDFExporting {
         }
     }
 
-    /// Lays the whole document out once, in a single container of unbounded height, and
-    /// cuts pages at line boundaries by vertical position: linear in the document length.
-    /// A paragraph that starts on a page and would cross its end moves to the next page;
-    /// a whitespace-only tail joins the previous page instead of becoming a blank page.
+    /// Use one layout for pagination and drawing, preserving paragraph/list geometry.
     nonisolated static func pages(for attributedText: NSAttributedString) -> [Page] {
-        guard attributedText.length > 0 else { return [Page(content: attributedText)] }
         let contentWidth = VacancyPDFDefaults.paperSize.width - VacancyPDFDefaults.horizontalMargin * 2
         let pageHeight = VacancyPDFDefaults.paperSize.height - VacancyPDFDefaults.verticalMargin * 2
-            - VacancyPDFDefaults.paginationBottomSafetyMargin
-
-        let lines: [(start: Int, minY: CGFloat, maxY: CGFloat)] = autoreleasepool {
-            let textStorage = NSTextStorage(attributedString: attributedText)
-            let layoutManager = NSLayoutManager()
-            textStorage.addLayoutManager(layoutManager)
-            let container = NSTextContainer(size: NSSize(width: contentWidth, height: .greatestFiniteMagnitude))
-            container.lineFragmentPadding = 0
-            layoutManager.addTextContainer(container)
-            layoutManager.ensureLayout(for: container)
-            var result: [(start: Int, minY: CGFloat, maxY: CGFloat)] = []
-            layoutManager.enumerateLineFragments(forGlyphRange: layoutManager.glyphRange(for: container)) {
-                rect, _, _, glyphRange, _ in
-                let characters = layoutManager.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
-                result.append((characters.location, rect.minY, rect.maxY))
-            }
-            return result
+        let layout = DocumentLayout(attributedText, width: contentWidth)
+        let manager = layout.manager
+        let allGlyphs = manager.glyphRange(for: layout.container)
+        var lines: [(start: Int, glyph: NSRange, minY: CGFloat, maxY: CGFloat)] = []
+        manager.enumerateLineFragments(forGlyphRange: allGlyphs) { rect, _, _, glyphRange, _ in
+            let chars = manager.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
+            lines.append((chars.location, glyphRange, rect.minY, rect.maxY))
         }
-        guard !lines.isEmpty else { return [Page(content: attributedText)] }
+        guard !lines.isEmpty else {
+            return [Page(content: attributedText, layout: layout, glyphRange: allGlyphs, firstLineY: 0)]
+        }
 
         let source = attributedText.string as NSString
         var pageStarts = [0]
         var index = 1
         while index < lines.count {
             let first = pageStarts[pageStarts.count - 1]
-            guard lines[index].maxY - lines[first].minY > pageHeight else {
-                index += 1
-                continue
-            }
+            guard lines[index].maxY - lines[first].minY > pageHeight else { index += 1; continue }
             var next = index
             let paragraph = source.paragraphRange(for: NSRange(location: lines[index].start, length: 0))
             if paragraph.location > lines[first].start {
-                while next > first + 1, lines[next].start > paragraph.location { next -= 1 }
+                var paragraphFirst = index
+                while paragraphFirst > first, lines[paragraphFirst].start > paragraph.location,
+                      lines[index].maxY - lines[paragraphFirst - 1].minY <= pageHeight / 3 {
+                    paragraphFirst -= 1
+                }
+                if lines[paragraphFirst].start <= paragraph.location {
+                    var paragraphLast = index
+                    while paragraphLast + 1 < lines.count,
+                          lines[paragraphLast + 1].start < NSMaxRange(paragraph),
+                          lines[paragraphLast + 1].maxY - lines[paragraphFirst].minY <= pageHeight / 3 {
+                        paragraphLast += 1
+                    }
+                    let hasMoreLines = paragraphLast + 1 < lines.count
+                        && lines[paragraphLast + 1].start < NSMaxRange(paragraph)
+                    if !hasMoreLines, lines[paragraphLast].maxY - lines[paragraphFirst].minY <= pageHeight / 3 {
+                        next = paragraphFirst
+                    }
+                }
             }
             pageStarts.append(next)
             index = next + 1
@@ -1381,16 +1396,21 @@ final class FavoriteVacanciesPDFExporter: FavoriteVacanciesPDFExporting {
             let end = position + 1 < pageStarts.count ? lines[pageStarts[position + 1]].start : attributedText.length
             guard end > start else { continue }
             let range = NSRange(location: start, length: end - start)
+            let glyphStart = lines[lineIndex].glyph.location
+            let glyphEnd = position + 1 < pageStarts.count ? lines[pageStarts[position + 1]].glyph.location : NSMaxRange(allGlyphs)
             if let previous = pages.last,
                source.substring(with: range).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 let merged = NSMutableAttributedString(attributedString: previous.content)
                 merged.append(attributedText.attributedSubstring(from: range))
-                pages[pages.count - 1] = Page(content: merged)
+                pages[pages.count - 1] = Page(content: merged, layout: layout,
+                    glyphRange: NSRange(location: previous.glyphRange.location, length: glyphEnd - previous.glyphRange.location),
+                    firstLineY: previous.firstLineY)
             } else {
-                pages.append(Page(content: attributedText.attributedSubstring(from: range)))
+                pages.append(Page(content: attributedText.attributedSubstring(from: range), layout: layout,
+                    glyphRange: NSRange(location: glyphStart, length: glyphEnd - glyphStart), firstLineY: lines[lineIndex].minY))
             }
         }
-        return pages.isEmpty ? [Page(content: attributedText)] : pages
+        return pages
     }
 
     nonisolated static func pdfData(
@@ -1413,14 +1433,15 @@ final class FavoriteVacanciesPDFExporter: FavoriteVacanciesPDFExporting {
             context.scaleBy(x: 1, y: -1)
             NSGraphicsContext.saveGraphicsState()
             NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: true)
-            page.content.draw(
-                with: NSRect(
-                    x: VacancyPDFDefaults.horizontalMargin, y: VacancyPDFDefaults.verticalMargin,
-                    width: VacancyPDFDefaults.paperSize.width - VacancyPDFDefaults.horizontalMargin * 2,
-                    height: VacancyPDFDefaults.paperSize.height - VacancyPDFDefaults.verticalMargin * 2
-                ),
-                options: [.usesLineFragmentOrigin, .usesFontLeading]
+            let contentRect = NSRect(
+                x: VacancyPDFDefaults.horizontalMargin, y: VacancyPDFDefaults.verticalMargin,
+                width: VacancyPDFDefaults.paperSize.width - VacancyPDFDefaults.horizontalMargin * 2,
+                height: VacancyPDFDefaults.paperSize.height - VacancyPDFDefaults.verticalMargin * 2
             )
+            context.clip(to: contentRect)
+            let origin = NSPoint(x: contentRect.minX, y: contentRect.minY - page.firstLineY)
+            page.layout.manager.drawBackground(forGlyphRange: page.glyphRange, at: origin)
+            page.layout.manager.drawGlyphs(forGlyphRange: page.glyphRange, at: origin)
             NSGraphicsContext.restoreGraphicsState()
             context.restoreGState()
             context.endPDFPage()

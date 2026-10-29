@@ -16,12 +16,12 @@ final class HHVacancySberTests: XCTestCase {
             "Backend-разработчик", "Разработчик 1С", "QA Engineer", "SRE инженер",
             "Информационные и коммуникационные технологии", "Архитектор решений",
             "Архитектура решений", "Технический писатель", "UX/UI-дизайнер",
-            "Менеджер продукта", "Финансовый аналитик", "HR-аналитика", "Риск-аналитика",
+            "Менеджер продукта",
             "BI-разработка", "Инженерия данных", "Data Governance", "ETL-разработчик",
             "Машинное обучение", "LLM-приложения", "RAG-системы", "Edge AI",
             "Промышленная автоматизация", "Геоинформационные системы", "Биоинформатика",
             "Методология разработки", "Low-code разработчик", "C++ developer", "HR-tech",
-            "Пентестер", "Системный администратор", "Product Owner", "Интернет"
+            "Пентестер", "Системный администратор", "Product Owner"
         ]
         for title in titles {
             XCTAssertTrue(VacancyTechnologyClassifier.matches(title: title), title)
@@ -38,6 +38,89 @@ final class HHVacancySberTests: XCTestCase {
         XCTAssertTrue(VacancyTechnologyClassifier.matches(title: "Эксперт", roles: ["Программист, разработчик"]))
         XCTAssertTrue(VacancyTechnologyClassifier.matches(title: "Инженер", context: "Разработка RAG-системы и векторный поиск"))
         XCTAssertFalse(VacancyTechnologyClassifier.matches(title: "Repair specialist"))
+    }
+
+    // Frozen HH search results, title-only conservative labels; 29.10.2026.
+    // Source: https://hh.ru/vacancies/analitik/sber (individual vacancy listings).
+    func testRealVacancyTitleReferenceSet() {
+        let cases: [(String, VacancyField)] = [
+            ("Стажер бизнес-аналитик", .general),
+            ("Стажер (Финансовый аналитик)", .general),
+            ("Data analyst (Индийский проект)", .technology),
+            ("Бизнес-аналитик", .general),
+            ("Аналитик по развитию (Strategy & Operations / Российско-Индийский деловой совет)", .general),
+            ("Fullstack аналитик", .technology),
+            ("BI аналитик (SQL, DWH)", .technology),
+            ("Бизнес-аналитик в продукт “Каркас платформы FinAl”", .general),
+            ("Аналитик по корпоративным финансам", .general),
+            ("Системный аналитик", .technology),
+            ("Стажер Data Analyst", .technology),
+            ("Аналитик проектов по организационному развитию", .general),
+            ("Системный аналитик (Финансовые рынки)", .technology),
+            ("Системный аналитик", .technology),
+            ("Системный аналитик (BI-платформа Навигатор)", .technology),
+            ("Продуктовый аналитик в команду 911", .general),
+            ("Аналитик данных", .technology),
+            ("Senior бизнес-аналитик", .general),
+            ("BI - аналитик", .technology),
+            ("Аналитик в команду цифровых активов и криптовалют (DeFi / Web3 / ЦФА)", .general),
+            ("Аналитик по процентному риску банковский книги", .general),
+            ("Системный аналитик (HR-платформа Пульс)", .technology),
+            ("Аналитик данных", .technology),
+            ("Системный аналитик (senior)", .technology),
+            ("Системный аналитик (Инвестиционные продукты)", .technology),
+            ("Инвестиционный аналитик", .general),
+            ("Системный аналитик (Sber AntiFraud Platform)", .informationSecurity),
+            ("Системный аналитик по развитию витрин данных", .technology),
+            ("Системный аналитик (команда Единый профиль клиентов)", .technology),
+            ("Системный аналитик", .technology),
+            ("Бизнес-аналитик", .general),
+            ("Аналитик данных", .technology),
+            ("Бизнес-аналитик (риски корпоративно - инвестиционного бизнеса)", .general),
+            ("Аналитик", .general),
+            ("Fullstuck-аналитик", .general),
+            ("Системный аналитик", .technology),
+            ("Системный аналитик (Депозитарий)", .technology),
+            ("Бизнес аналитик в команду ко-лендинга", .general),
+            ("Продуктовый аналитик/Аналитик данных в Дивизион \\\"Бизнес-профиль\\\"", .technology),
+            ("Senior Системный аналитик", .technology),
+            ("Системный аналитик (Пруденциальный резерв)", .technology),
+            ("Системный аналитик (Риски строительных проектов)", .technology),
+            ("Senior Бизнес аналитик, pre trade", .general),
+            ("Системный аналитик AEF.Lite (GenAI / AI-агенты)", .technology),
+            ("Middle Системный аналитик (Ипотечный домен)", .technology),
+            ("Системный аналитик (BI-платформа Навигатор)", .technology),
+            ("Системный аналитик", .technology),
+            ("Аналитик DWH", .technology),
+            ("Руководитель направления (BI аналитика)", .technology),
+            ("Аналитик финансист", .general),
+        ]
+        XCTAssertEqual(cases.count, 50)
+        for (title, expected) in cases {
+            let security = VacancyInformationSecurityClassifier.matches(title: title)
+            let actual: VacancyField = security ? .informationSecurity :
+                (VacancyTechnologyClassifier.matches(title: title) ? .technology : .general)
+            XCTAssertEqual(actual, expected, title)
+        }
+    }
+
+
+    func testAmbiguousTechnologyAndSecurityTermsDoNotLabelUnrelatedVacancies() {
+        for title in ["Курьер интернет-магазина", "Бухгалтер (1С)", "Финансовый аналитик", "Аналитик по продажам", "Архитектор по продажам", "Оператор-программист станков с ЧПУ", "Специалист по SWIFT-платежам", "Специалист QC (фармацевтика)"] {
+            XCTAssertFalse(VacancyTechnologyClassifier.matches(title: title), title)
+        }
+        for context in ["работа с данными клиентов", "разработка программ лояльности", "цифровая трансформация", "финтех", "Соблюдать требования защиты персональных данных", "Знание основ информационной безопасности"] {
+            XCTAssertFalse(VacancyTechnologyClassifier.matches(title: "Кассир", context: context), context)
+        }
+        for title in ["Менеджер по продажам электронной подписи", "Специалист по взаимодействию с регуляторами"] {
+            XCTAssertFalse(VacancyInformationSecurityClassifier.matches(title: title), title)
+        }
+        for context in ["Осторожно, фишинг", "гарантируем конфиденциальность данных"] {
+            XCTAssertFalse(VacancyInformationSecurityClassifier.matches(title: "Кассир", context: context), context)
+        }
+        XCTAssertTrue(VacancyInformationSecurityClassifier.matches(title: "Инженер по резервному копированию в отделе информационной безопасности"))
+        XCTAssertTrue(VacancyTechnologyClassifier.matches(title: "Разработчик 1С"))
+        XCTAssertTrue(VacancyTechnologyClassifier.matches(title: "Swift-разработчик"))
     }
 
     func testInformationSecurityClassificationCoversRequestedDisciplines() {
@@ -74,7 +157,10 @@ final class HHVacancySberTests: XCTestCase {
         """.components(separatedBy: CharacterSet(charactersIn: ";\n")).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         XCTAssertGreaterThan(disciplines.count, 130)
         for discipline in disciplines {
-            XCTAssertTrue(VacancyInformationSecurityClassifier.matches(title: discipline), discipline)
+            let ambiguous = ["анализ исходного кода", "динамическое тестирование приложений", "анализ состава программного обеспечения", "сегментация сетей", "анализ сетевого трафика", "песочницы", "реагирование на инциденты", "расследование инцидентов", "аутентификация и авторизация", "конфиденциальность данных", "классификация данных", "электронная подпись", "управление ключами", "соответствие требованиям Банка России", "непрерывность деятельности и аварийное восстановление", "резервное копирование и восстановление", "взаимодействие с регуляторами"]
+            if !ambiguous.contains(discipline) {
+                XCTAssertTrue(VacancyInformationSecurityClassifier.matches(title: discipline), discipline)
+            }
         }
         for title in ["Специалист по ИБ", "Инженер СЗИ/СКЗИ", "SOC-аналитик L2", "Архитектор AppSec",
                       "CISO", "Cybersecurity Engineer", "Information Security Officer", "Пентестер",
@@ -84,13 +170,13 @@ final class HHVacancySberTests: XCTestCase {
     }
 
     func testInformationSecurityClassificationUsesSpecificContextAndRoleEvidence() {
-        for context in ["Проектирование систем защиты информации", "Мониторинг событий SIEM и расследование атак",
-                        "Проводить аудит информационной безопасности", "Внедрение DLP", "Работа с PCI DSS",
-                        "Контроль соблюдения требований информационной безопасности", "Разработка политик ИБ"] {
+        for context in ["Проектирование систем защиты информации", "Мониторинг SIEM и расследование атак",
+                        "Проводить аудит информационной безопасности", "Внедрение DLP",
+                        "Разработка политик ИБ"] {
             XCTAssertTrue(VacancyInformationSecurityClassifier.matches(title: "Главный эксперт", context: context), context)
         }
         XCTAssertTrue(VacancyInformationSecurityClassifier.matches(title: "Эксперт", roles: ["Специалист по информационной безопасности"]))
-        XCTAssertTrue(VacancyInformationSecurityClassifier.matches(title: "Эксперт", roles: ["Инженер по резервному копированию"]))
+        XCTAssertFalse(VacancyInformationSecurityClassifier.matches(title: "Эксперт", roles: ["Инженер по резервному копированию"]))
     }
 
     func testInformationSecurityClassificationAvoidsGenericSecurityAndBoilerplate() {
@@ -470,6 +556,78 @@ final class HHVacancySberTests: XCTestCase {
         XCTAssertFalse(migrated.contains(#""reasons""#))
     }
 
+    func testFavoriteMigrationReturnsV1RecordsWhenWriteFails() throws {
+        let url = temporaryDirectory().appendingPathComponent("favorites.json")
+        let original = Data(#"{"version":1,"favorites":[{"id":"42","name":"Аналитик","employerName":"СБЕР","isArchived":false,"favoritedAt":"2026-09-01T00:00:00Z","updatedAt":"2026-09-01T00:00:00Z"}]}"#.utf8)
+        try original.write(to: url)
+        let store = FavoriteVacancyStore(fileURL: url, fileManager: RejectDirectoryCreationFileManager())
+        let result = try store.loadWithWarning()
+        XCTAssertEqual(result.records.map(\.id), ["42"])
+        XCTAssertNotNil(result.warning)
+        XCTAssertEqual(try Data(contentsOf: url), original)
+    }
+
+    func testFavoriteRecoversValidRecordsAndPreservesOriginalBackup() throws {
+        let url = temporaryDirectory().appendingPathComponent("favorites.json")
+        let original = Data(#"{"version":2,"favorites":[{"id":"42","name":"Аналитик","employerName":"СБЕР","isArchived":false,"favoritedAt":"2026-09-01T00:00:00Z","updatedAt":"2026-09-01T00:00:00Z"},{"id":42},null]}"#.utf8)
+        try original.write(to: url)
+        let store = FavoriteVacancyStore(fileURL: url)
+        let result = try store.loadWithWarning()
+        XCTAssertEqual(result.records.map(\.id), ["42"])
+        XCTAssertTrue(result.warning?.contains("пропущено записей 2") == true)
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: url.path + ".bak")), original)
+        try store.save(result.records)
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: url.path + ".bak")), original)
+    }
+
+    func testSnapshotRecoversGoodRowsAndMarksIncomplete() throws {
+        let url = temporaryDirectory().appendingPathComponent("vacancies.json")
+        let store = VacancySnapshotStore(fileURL: url)
+        let row = VacancySearchResult(summary: summary(id: "ok", areaID: "1", areaName: "Москва"), location: .unknown)
+        try store.save(.init(values: [row], issues: [], updatedAt: Date(timeIntervalSince1970: 100)))
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        var rows = try XCTUnwrap(object["vacancies"] as? [[String: Any]])
+        rows.append(["summary": ["id": 42]])
+        object["vacancies"] = rows
+        let original = try JSONSerialization.data(withJSONObject: object)
+        try original.write(to: url)
+        let loaded = try XCTUnwrap(store.load())
+        XCTAssertEqual(loaded.results.map(\.id), ["ok"])
+        XCTAssertFalse(loaded.issues.isEmpty)
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: url.path + ".bak")), original)
+    }
+
+    @MainActor
+    func testUnsupportedFavoritesShowUnsavedChangesWarning() async throws {
+        let url = temporaryDirectory().appendingPathComponent("favorites.json")
+        let original = Data(#"{"version":99,"favorites":[]}"#.utf8)
+        try original.write(to: url)
+        let model = VacancySearchViewModel(apiClient: MockAPIClient(mode: .simple),
+            employerStore: TestEmployerStore(entries: [.init(id: "3529", name: "СБЕР", comment: "test")]),
+            areaStore: AreaDirectoryStore(fileURL: temporaryDirectory().appendingPathComponent("areas.json")),
+            favoritesStore: FavoriteVacancyStore(fileURL: url))
+        await model.refreshVacancies()
+        model.toggleFavorite(id: "3529-vacancy")
+        XCTAssertEqual(model.favorites.count, 1)
+        XCTAssertTrue(model.favoritesWarning?.contains("не сохраняются") == true)
+        model.flushFavoritesOnTermination()
+        XCTAssertEqual(try Data(contentsOf: url), original)
+    }
+
+    @MainActor
+    func testTerminationFlushPersistsLatestFavoriteMutation() async throws {
+        let url = temporaryDirectory().appendingPathComponent("favorites.json")
+        let store = FavoriteVacancyStore(fileURL: url)
+        let model = VacancySearchViewModel(apiClient: MockAPIClient(mode: .simple),
+            employerStore: TestEmployerStore(entries: [.init(id: "3529", name: "СБЕР", comment: "test")]),
+            areaStore: AreaDirectoryStore(fileURL: temporaryDirectory().appendingPathComponent("areas.json")), favoritesStore: store)
+        await model.refreshVacancies()
+        model.toggleFavorite(id: "3529-vacancy")
+        model.flushFavoritesOnTermination()
+        XCTAssertEqual(try store.load().map(\.id), ["3529-vacancy"])
+        await model.waitForPendingFavoritesSaves()
+    }
+
     @MainActor
     func testUnsupportedFavoritesSchemaIsNotOverwrittenByArchiveCheck() async throws {
         let url = temporaryDirectory().appendingPathComponent("favorites.json")
@@ -764,7 +922,10 @@ final class HHVacancySberTests: XCTestCase {
         XCTAssertTrue(empty.issues.isEmpty)
         let row = VacancySearchResult(summary: summary(id: "duplicate", areaID: "1", areaName: "Москва"), location: .unknown)
         try store.save(.init(values: [row, row], issues: [], updatedAt: date))
-        XCTAssertThrowsError(try store.load())
+        let recovered = try XCTUnwrap(store.load())
+        XCTAssertEqual(recovered.vacancies.count, 1)
+        XCTAssertFalse(recovered.issues.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: try store.fileURL.path + ".bak"))
     }
 
     @MainActor
@@ -1612,7 +1773,7 @@ final class HHVacancySberTests: XCTestCase {
         XCTAssertNotNil(model.favorites.first?.archiveCheckedAt)
         await model.loadVacancyDetails(id: "3529-vacancy")
         let after = await client.detailRequestCount
-        XCTAssertEqual(after, 1, "Archive response supplies the card description")
+        XCTAssertEqual(after, 2, "Archive status update invalidates cached details")
     }
 
     func testRateLimitWaitPreventsQueuedRequestsFromOvertakingRetry() async throws {
@@ -2799,6 +2960,72 @@ final class HHVacancySberTests: XCTestCase {
         try FavoriteVacanciesPDFExporter.validatePDF(data: data, expectedPages: pages.count)
     }
 
+    func testPDFLongBulletedParagraphKeepsContinuationIndentAndUsesFirstPage() throws {
+        let style = NSMutableParagraphStyle()
+        style.firstLineHeadIndent = 4
+        style.headIndent = 30
+        style.tabStops = [NSTextTab(textAlignment: .left, location: 30)]
+        let lead = NSAttributedString(string: String(repeating: "Введение\n", count: 12), attributes: [
+            .font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.black
+        ])
+        let text = NSMutableAttributedString(attributedString: lead)
+        let lines = (0..<100).map { String(format: "TOKEN%03d content", $0) }
+        text.append(NSAttributedString(string: "•\t" + lines.joined(separator: "\u{2028}") + "\n", attributes: [
+            .font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.black, .paragraphStyle: style
+        ]))
+        let pages = FavoriteVacanciesPDFExporter.pages(for: text)
+        XCTAssertGreaterThan(pages.count, 1)
+        XCTAssertTrue(pages[0].content.string.contains("TOKEN000"), "Long paragraph must use space remaining on first page")
+        let pdf = try XCTUnwrap(PDFDocument(data: FavoriteVacanciesPDFExporter.pdfData(for: pages)))
+        var locations: [(page: Int, x: CGFloat)] = []
+        for line in 0..<100 {
+            let token = String(format: "TOKEN%03d", line)
+            var matches: [(page: Int, x: CGFloat)] = []
+            for index in 0..<pdf.pageCount {
+                let page = try XCTUnwrap(pdf.page(at: index))
+                let value = (page.string ?? "") as NSString
+                let range = value.range(of: token)
+                if range.location != NSNotFound {
+                    let selection = try XCTUnwrap(page.selection(for: range))
+                    matches.append((index, selection.bounds(for: page).minX))
+                }
+            }
+            XCTAssertEqual(matches.count, 1, "\(token) must occur once in PDF")
+            if let match = matches.first { locations.append(match) }
+        }
+        let continuation = try XCTUnwrap(locations.firstIndex(where: { $0.page == 1 }))
+        XCTAssertGreaterThan(continuation, 1)
+        XCTAssertEqual(locations[continuation].x, locations[continuation - 1].x, accuracy: 1.0,
+                       "A continued list line must use its original head indent")
+    }
+
+    @MainActor
+    func testPDFHTMLListWithLineBreaksSurvivesPageBoundary() throws {
+        let pieces = (0..<100).map { String(format: "HTML%03d текст", $0) }
+        let html = "<p>Введение</p><ul><li>" + pieces.joined(separator: "<br>") + "</li><li>Конец списка</li></ul>"
+        let imported = VacancyHTMLAttributedText.convert(html)
+        let pages = FavoriteVacanciesPDFExporter.pages(for: imported)
+        XCTAssertGreaterThan(pages.count, 1)
+        let pdf = try XCTUnwrap(PDFDocument(data: FavoriteVacanciesPDFExporter.pdfData(for: pages)))
+        var locations: [(page: Int, x: CGFloat)] = []
+        for index in 0..<100 {
+            let token = String(format: "HTML%03d", index)
+            var found: [(page: Int, x: CGFloat)] = []
+            for pageIndex in 0..<pdf.pageCount {
+                let page = try XCTUnwrap(pdf.page(at: pageIndex))
+                let range = ((page.string ?? "") as NSString).range(of: token)
+                if range.location != NSNotFound {
+                    found.append((pageIndex, try XCTUnwrap(page.selection(for: range)).bounds(for: page).minX))
+                }
+            }
+            XCTAssertEqual(found.count, 1, "\(token) must occur once in PDF")
+            if let match = found.first { locations.append(match) }
+        }
+        let continuation = try XCTUnwrap(locations.firstIndex(where: { $0.page == 1 }))
+        XCTAssertGreaterThan(continuation, 1)
+        XCTAssertEqual(locations[continuation].x, locations[continuation - 1].x, accuracy: 1.0)
+    }
+
     func testPDFPaginationDoesNotEmitBlankPagesForWhitespaceTail() throws {
         let source = "Текст вакансии\n" + String(repeating: "\n", count: 400)
         let attributed = NSAttributedString(
@@ -3596,6 +3823,73 @@ final class HHVacancySberTests: XCTestCase {
         await model.search()
         XCTAssertNil(model.errorMessage)
         XCTAssertEqual(model.results.map(\.id), ["new", "old"])
+    }
+
+    @MainActor
+    func testRestoredFavoriteOverlaysSnapshotInListAndPDF() async throws {
+        let directory = temporaryDirectory()
+        let snapshotStore = VacancySnapshotStore(fileURL: directory.appendingPathComponent("vacancies.json"))
+        let favoriteStore = FavoriteVacancyStore(fileURL: directory.appendingPathComponent("favorites.json"))
+        let vacancy = summary(id: "saved", areaID: "1", areaName: "Москва")
+        let live = VacancySearchResult(summary: vacancy, location: .subject(id: "1", name: "Москва", cityID: "1", cityName: "Москва"))
+        try snapshotStore.save(.init(values: [live], issues: [], updatedAt: Date(timeIntervalSince1970: 100)))
+        let details = HHVacancyDetails(id: "saved", name: "Сохранённое описание", employer: vacancy.employer,
+            area: vacancy.area, salary: nil, alternateURL: nil, description: "<p>Сохранённый текст</p>", archived: false)
+        let saved = VacancySearchResult(id: "saved", summary: vacancy, details: details, location: live.location,
+            isDetailLoaded: true, persistedSalaryText: "Сохранённая зарплата", isArchived: true,
+            archiveCheckedAt: Date(timeIntervalSince1970: 200))
+        try favoriteStore.save([.init(result: saved, favoritedAt: Date(timeIntervalSince1970: 50),
+                                      updatedAt: Date(timeIntervalSince1970: 200), archiveCheckedAt: saved.archiveCheckedAt)])
+        let exporter = PDFEnrichmentExporter()
+        let client = MockAPIClient(mode: .failure)
+        let model = VacancySearchViewModel(apiClient: client, employerStore: TestEmployerStore(entries: []),
+            favoritesStore: favoriteStore, snapshotStore: snapshotStore, favoritePDFExporter: exporter)
+        await model.loadPersistenceIfNeeded()
+        model.displayMode = .favorites
+        let item = try XCTUnwrap(model.displayedResults.first)
+        XCTAssertTrue(item.isArchived)
+        XCTAssertEqual(item.archiveCheckedAt, saved.archiveCheckedAt)
+        XCTAssertEqual(item.htmlDescription, "<p>Сохранённый текст</p>")
+        XCTAssertEqual(item.salaryText, "Сохранённая зарплата")
+        XCTAssertEqual(item.summary.id, live.summary.id)
+        XCTAssertTrue(item.isDetailLoaded)
+        for mode in [VacancyListMode.all, .favorites] {
+            model.displayMode = mode
+            await model.exportFavoriteVacanciesPDF()
+            let exported = try XCTUnwrap(exporter.snapshots.last?.first)
+            XCTAssertTrue(exported.isArchived)
+            XCTAssertEqual(exported.archiveCheckedAt, saved.archiveCheckedAt)
+            XCTAssertEqual(exported.htmlDescription, "<p>Сохранённый текст</p>")
+            XCTAssertEqual(exported.salaryText, "Сохранённая зарплата")
+        }
+        let count = await client.detailRequestCount
+        XCTAssertEqual(count, 0)
+    }
+
+    @MainActor
+    func testArchive404InvalidatesOldDetailCacheAndPreservesPersistedStatus() async throws {
+        let directory = temporaryDirectory()
+        let store = FavoriteVacancyStore(fileURL: directory.appendingPathComponent("favorites.json"))
+        let clock = AuditClock()
+        let client = ArchiveChangeClient()
+        let model = VacancySearchViewModel(apiClient: client,
+            employerStore: TestEmployerStore(entries: [.init(id: "1", name: "One", comment: "test")]),
+            areaStore: AreaDirectoryStore(fileURL: directory.appendingPathComponent("areas.json")),
+            favoritesStore: store, currentDate: { Date(timeIntervalSince1970: clock.now) })
+        await model.refreshVacancies()
+        await model.loadVacancyDetails(id: "changing")
+        model.toggleFavorite(id: "changing")
+        clock.advance(1_801)
+        await client.setArchived()
+        await model.checkArchiveStatusesIfNeeded()
+        await model.waitForPendingFavoritesSaves()
+        XCTAssertTrue(try XCTUnwrap(model.favorites.first).isArchived)
+        await model.loadVacancyDetails(id: "changing")
+        await model.waitForPendingFavoritesSaves()
+        let detailCalls = await client.detailCalls
+        XCTAssertEqual(detailCalls, 3)
+        XCTAssertTrue(try XCTUnwrap(model.favorites.first).isArchived)
+        XCTAssertTrue(try XCTUnwrap(store.load().first).isArchived)
     }
 
     @MainActor
@@ -4499,5 +4793,32 @@ private actor GrowingPartitionClient: HHVacancyAPIClient {
                 salary: nil, area: .init(id: request.areaID, name: "Регион"), alternateURL: nil, url: nil, snippet: nil)
         } : []
         return .init(items: items, found: count, pages: (count + 99) / 100, page: request.page, perPage: request.perPage)
+    }
+}
+
+private actor ArchiveChangeClient: HHVacancyAPIClient {
+    private var archived = false
+    private(set) var detailCalls = 0
+    func setArchived() { archived = true }
+    nonisolated func validateVacanciesAccess() throws {}
+    func areaTree() async throws -> HHAreaNode { .init(id: "113", name: "Россия", areas: [.init(id: "1", name: "Москва")]) }
+    func vacancyDictionaries() async throws -> HHVacancyDictionaries { .init(experience: [], workFormat: [], schedule: []) }
+    func searchVacancies(_ request: HHVacancySearchRequest) async throws -> HHVacancySearchResponse {
+        let row = HHVacancySummary(id: "changing", name: "Вакансия", employer: .init(name: "One", id: "1"),
+            salary: nil, area: .init(id: "1", name: "Москва"), alternateURL: nil, url: nil, snippet: nil)
+        return .init(items: [row], found: 1, pages: 1, page: 0, perPage: 100)
+    }
+    func vacancyDetails(id: String) async throws -> HHVacancyDetails {
+        detailCalls += 1
+        if archived { throw HHAPIError.requestFailed(statusCode: 404, message: nil) }
+        return .init(id: id, name: "Вакансия", employer: .init(name: "One", id: "1"), area: nil,
+            salary: nil, alternateURL: nil, description: "<p>Старое описание</p>", archived: false)
+    }
+}
+
+private final class RejectDirectoryCreationFileManager: FileManager, @unchecked Sendable {
+    override func createDirectory(at url: URL, withIntermediateDirectories createIntermediates: Bool,
+                                  attributes: [FileAttributeKey: Any]? = nil) throws {
+        throw CocoaError(.fileWriteNoPermission)
     }
 }

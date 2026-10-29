@@ -74,6 +74,7 @@ final class VacancySearchViewModel: ObservableObject {
     private var saveTask: Task<Void, Never>?
     private var pendingPersistenceSnapshot: (revision: Int, values: [FavoriteVacancyRecord])?
     private var persistenceRevision = 0
+    private var savedPersistenceRevision = 0
     private var nextPersistenceRetryAt = Date.distantPast
     private var isPersistenceDriverRunning = false
     private var isFavoritesPersistenceWritable = false
@@ -147,7 +148,7 @@ final class VacancySearchViewModel: ObservableObject {
         self.apiClient = apiClient
         self.employerStore = employerStore
         self.areaStore = areaStore
-        self.favoritesStore = favoritesStore
+        self.favoritesStore = SerializedFavoriteStore(favoritesStore)
         self.snapshotStore = snapshotStore
         self.favoritePDFExporter = favoritePDFExporter ?? FavoriteVacanciesPDFExporter()
         self.statisticsPDFDestination = statisticsPDFDestination ?? Self.chooseStatisticsPDFDestination
@@ -226,7 +227,7 @@ final class VacancySearchViewModel: ObservableObject {
         case .favorites:
             let live = Dictionary(uniqueKeysWithValues: results.map { ($0.id, $0) })
             return favorites.map { favorite in
-                if let value = live[favorite.id] { return value }
+                if let value = live[favorite.id] { return favorite.merging(value) }
                 let value = favorite.searchResult
                 guard let state = offlineDetailStates[favorite.id] else { return value }
                 return value.updatingDetailState(isLoading: state.isLoading, errorMessage: state.errorMessage)
@@ -241,10 +242,12 @@ final class VacancySearchViewModel: ObservableObject {
             return
         }
         do {
-            favorites = try favoritesStore.load().sorted { $0.favoritedAt > $1.favoritedAt }
+            let loaded = try favoritesStore.loadWithWarning()
+            favorites = loaded.records.sorted { $0.favoritedAt > $1.favoritedAt }
+            favoritesWarning = loaded.warning
             isFavoritesPersistenceWritable = true
         }
-        catch { favoritesWarning = error.localizedDescription }
+        catch { favoritesWarning = "Не удалось загрузить избранное: \(error.localizedDescription). Изменения не сохраняются." }
         do {
             if let snapshot = try snapshotStore?.load() {
                 results = orderedNewestFirst(snapshot.results)
@@ -503,7 +506,8 @@ final class VacancySearchViewModel: ObservableObject {
     }
 
     private func apply(details: HHVacancyDetails, at index: Int) {
-        let old = results[index]
+        let current = results[index]
+        let old = favorites.first(where: { $0.id == current.id })?.merging(current) ?? current
         let value = VacancySearchResult(
             id: old.id,
             summary: old.summary,
@@ -537,7 +541,12 @@ final class VacancySearchViewModel: ObservableObject {
     }
 
     private func persistFavorites() {
-        guard isFavoritesPersistenceWritable else { return }
+        guard isFavoritesPersistenceWritable else {
+            if favoritesWarning?.contains("Изменения не сохраняются") != true {
+                favoritesWarning = "Изменения избранного не сохраняются: исходный файл не удалось загрузить."
+            }
+            return
+        }
         persistenceRevision += 1
         pendingPersistenceSnapshot = (persistenceRevision, favorites)
         startPersistenceDriver()
@@ -556,17 +565,31 @@ final class VacancySearchViewModel: ObservableObject {
             pendingPersistenceSnapshot = nil
             do {
                 try await Task.detached { try store.save(pending.values) }.value
+                savedPersistenceRevision = max(savedPersistenceRevision, pending.revision)
                 if pending.revision == persistenceRevision, pendingPersistenceSnapshot == nil {
                     favoritesWarning = nil
                 }
             } catch {
                 if pending.revision == persistenceRevision, pendingPersistenceSnapshot == nil {
-                    favoritesWarning = "Не удалось сохранить избранное: \(error.localizedDescription)"
+                    favoritesWarning = "Не удалось сохранить избранное: \(error.localizedDescription). Изменения пока не сохраняются."
                     pendingPersistenceSnapshot = pending
                     nextPersistenceRetryAt = currentDate().addingTimeInterval(Self.archiveBatchInterval)
                     return
                 }
             }
+        }
+    }
+
+    /// Called synchronously during application termination. The store lock waits for
+    /// an older background write, then writes the latest revision last.
+    func flushFavoritesOnTermination() {
+        guard isFavoritesPersistenceWritable, persistenceRevision > savedPersistenceRevision else { return }
+        do {
+            try favoritesStore.save(favorites)
+            savedPersistenceRevision = persistenceRevision
+            pendingPersistenceSnapshot = nil
+        } catch {
+            favoritesWarning = "Не удалось сохранить избранное при завершении: \(error.localizedDescription)"
         }
     }
 
@@ -645,6 +668,7 @@ final class VacancySearchViewModel: ObservableObject {
     }
 
     private func updateResultArchiveStatus(id: String, archived: Bool, checkedAt: Date, revision: Int) {
+        detailsCache[id] = nil
         guard revision == resultsRevision else { return }
         if let index = results.firstIndex(where: { $0.id == id }) {
             results[index] = results[index].updatingArchiveStatus(archived, checkedAt: checkedAt)
@@ -717,9 +741,9 @@ final class VacancySearchViewModel: ObservableObject {
         isExportingFavoritesPDF = true
         defer { isExportingFavoritesPDF = false; favoritesPDFExportProgress = nil }
         // Freeze local rows and membership before enrichment can suspend this actor.
-        let currentResults = unfilteredResults
+        let currentResults = Dictionary(uniqueKeysWithValues: results.map { ($0.id, $0) })
         let snapshot = favorites.map { favorite in
-            currentResults.first { $0.id == favorite.id } ?? favorite.searchResult
+            currentResults[favorite.id].map { favorite.merging($0) } ?? favorite.searchResult
         }
         do {
             var values: [VacancySearchResult] = []
@@ -811,7 +835,7 @@ final class VacancySearchViewModel: ObservableObject {
                 location: source.location,
                 isDetailLoaded: true,
                 persistedSalaryText: source.persistedSalaryText,
-                isArchived: details.archived ?? source.isArchived,
+                isArchived: source.archiveCheckedAt != nil ? source.isArchived : (details.archived ?? source.isArchived),
                 archiveCheckedAt: source.archiveCheckedAt
             )
         } catch is CancellationError {

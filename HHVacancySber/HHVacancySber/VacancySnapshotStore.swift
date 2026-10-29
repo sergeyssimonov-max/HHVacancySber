@@ -19,6 +19,13 @@ struct VacancySnapshot: Codable, Sendable {
         self.updatedAt = updatedAt
     }
 
+    init(vacancies: [Entry], issues: [VacancyCollectionIssue], updatedAt: Date) {
+        version = 1
+        self.vacancies = vacancies
+        self.issues = issues
+        self.updatedAt = updatedAt
+    }
+
     var results: [VacancySearchResult] {
         vacancies.map { VacancySearchResult(summary: $0.summary, location: $0.location) }
     }
@@ -65,14 +72,29 @@ struct VacancySnapshotStore: VacancySnapshotStoring, @unchecked Sendable {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         guard let version = try? decoder.decode(Version.self, from: data).version else {
+            _ = try CorruptFileBackup.copy(fileURL, fileManager: fileManager)
             throw VacancySnapshotStoreError.corruptedFile
         }
         guard version == 1 else { throw VacancySnapshotStoreError.unsupportedVersion(version) }
-        guard let snapshot = try? decoder.decode(VacancySnapshot.self, from: data),
-              Set(snapshot.vacancies.map { $0.summary.id }).count == snapshot.vacancies.count else {
+        struct Recovery: Decodable {
+            let vacancies: [RecoverableItem<VacancySnapshot.Entry>]
+            let issues: [RecoverableItem<VacancyCollectionIssue>]
+            let updatedAt: Date
+        }
+        guard let snapshot = try? decoder.decode(Recovery.self, from: data) else {
+            _ = try CorruptFileBackup.copy(fileURL, fileManager: fileManager)
             throw VacancySnapshotStoreError.corruptedFile
         }
-        return snapshot
+        var seen = Set<String>()
+        let values = snapshot.vacancies.compactMap(\.value).filter { seen.insert($0.summary.id).inserted }
+        var issues = snapshot.issues.compactMap(\.value)
+        let skipped = snapshot.vacancies.count - values.count + snapshot.issues.count - issues.count
+        if skipped > 0 {
+            let backup = try CorruptFileBackup.copy(fileURL, fileManager: fileManager)
+            issues.append(.init(employerID: "snapshot-recovery", employerName: "Снимок вакансий", expected: nil,
+                                actual: 0, failures: ["Восстановлен частично, пропущено записей: \(skipped); копия: \(backup.lastPathComponent)"]))
+        }
+        return VacancySnapshot(vacancies: values, issues: issues, updatedAt: snapshot.updatedAt)
     }
 
     func save(_ snapshot: VacancySnapshot) throws {

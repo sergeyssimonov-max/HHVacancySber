@@ -19,11 +19,20 @@ jobs:
           test "$(uname -m)" = arm64
           legacy_project='HHVacancy''Desk'
           legacy_bundle='local.sergey.HHVacancy''Desk'
-          ! grep -R -E "${legacy_project}|${legacy_bundle}" HHVacancySber README.md
+          if grep -R -q -E "${legacy_project}|${legacy_bundle}" HHVacancySber README.md; then
+            echo "Legacy project or bundle name found" >&2
+            exit 1
+          fi
           auth_config='HHVacancySber/HHVacancySber/HHAuthConfig.swift'
           grep -Eq 'static let appAccessToken = "[^"]+"' "$auth_config"
-          ! grep -q 'static let appAccessToken = placeholderAccessToken' "$auth_config"
-          ! grep -q 'static let appAccessToken = "REPLACE_WITH_YOUR_HH_APPLICATION_TOKEN"' "$auth_config"
+          if grep -q 'static let appAccessToken = placeholderAccessToken' "$auth_config"; then
+            echo "Application token references the placeholder" >&2
+            exit 1
+          fi
+          if grep -q 'static let appAccessToken = "REPLACE_WITH_YOUR_HH_APPLICATION_TOKEN"' "$auth_config"; then
+            echo "Application token is the placeholder" >&2
+            exit 1
+          fi
       - name: List project
         working-directory: HHVacancySber
         run: xcodebuild -project HHVacancySber.xcodeproj -list
