@@ -89,10 +89,42 @@ Do not combine this group with other live groups under the same five-request bud
 
 ## Runtime behavior
 
-Production searches are read-only. HHAPIClient permits at most two automatic retries for HTTP 429, holding the shared serial gate throughout the wait. The fallback delays are one and two seconds; a valid Retry-After delta or HTTP date can extend either delay up to 60 seconds. A server delay beyond that ceiling stops the operation rather than retrying early. HTTP 500, 502, 503 and 504 and short transport failures (timeout, lost connection, host unreachable, DNS lookup) get two separate bounded retries with the same one- and two-second backoff and Retry-After ceiling. HTTP 401, 403, CAPTCHA, other HTTP errors, offline and TLS failures are not retried. Exhausted 429 responses are surfaced to the caller and stop the background archive cycle.
+Production searches are read-only. A shared gate serializes requests and enforces at least one second between operations. Each logical request has a combined maximum of three HTTP attempts. HTTP 429 and transient HTTP 500/502/503/504 or short connection failures have bounded retry budgets with one- and two-second backoff. `Retry-After` is respected; an automatic wait above 60 seconds stops the operation, while the shared monotonic cooldown continues to prevent early requests, including after cancellation. Offline, TLS, authentication, 403 and CAPTCHA errors are not retried. The production session has 30-second request and 120-second resource timeouts.
 
-The collector is best effort. A partition that returns fewer vacancies than `found` is re-read once and the two reads are combined. Pages read before a failed page are kept. A non-terminal failure ends only its partition or employer and is reported with the employer's expected and received counts. Authorization, 403, CAPTCHA, exhausted 429 and cancellation stop the whole search. If nothing was read and a request failed, the search fails and the previous result stays on screen. An incomplete result is shown with a warning and is not served from the ten-minute search cache.
+The collector is best effort. A partition returning fewer unique vacancies than `found` is re-read once and the two reads are combined. Malformed vacancy items are skipped individually; a wholly malformed page does not prevent later pages from being read. Remaining shortfalls and failed partitions are reported by employer. Exhausted 429, 403 and CAPTCHA stop collection; if any vacancies were read, received pages are returned with issues for unfinished employers. Cancellation, missing token and 401 still abort. If nothing was read and a request failed, the previous result remains on screen. An incomplete result never replaces a previous complete result or satisfies the ten-minute cache; without a complete result, it is shown and persisted with its warning.
 
-Every opt-in live client explicitly sets maximumRateLimitRetries to zero, preserving its request budget and immediate stop on 429/403. Normal tests inject the retry sleeper to verify delay values without waiting for real rate limits; a separate cancellation test uses a real suspended Task. The gate is held during retry waits, but this is not a persistent session-wide blockade after the operation terminates.
+The accepted snapshot, including vacancies, locations, issues and completion time, is saved atomically and restored on startup. The refresh button always uses the network. Background archive checking yields to a scheduled or active search after its current request.
+
+Every opt-in live client explicitly sets maximumRateLimitRetries to zero, preserving its request budget and immediate stop on 429/403. Normal tests inject the retry sleeper to verify delay values without waiting for real rate limits; a separate cancellation test uses a real suspended Task. The shared cooldown is process-local and does not persist across application restarts.
 
 Additional live verification is a manual application run with the configured token. Do not add live traffic to the normal automated suite.
+
+## Историческая выборочная проверка API HH — 05.09.2026
+
+Выполнены **7 различных GET-запросов**, все получили **HTTP 200** и JSON.
+Время: 18:36:15–18:36:22 МСК (15:36:15–15:36:22 UTC).
+Использован application token из HHAuthConfig и те же Bearer, User-Agent,
+HH-User-Agent и Accept, что в приложении. Транспорт — URLSession с ephemeral-сессией;
+перенаправления отключены, повторных запросов и пагинации нет.
+Токен, заголовки авторизации и полные тела ответов не сохранены в отчёте.
+
+| № | GET api.hh.ru | HTTP | Результат |
+|---|---|---|---|
+| 1 | `/employers/11685629` | 200 | Единая Цифровая Платформа; ID 11685629; 7 открытых вакансий |
+| 2 | `/vacancies?employer_id=11685629&per_page=3&page=0` | 200 | found=7; получены 3 вакансии, у всех employer_id=11685629 |
+| 3 | `/employers/3529` | 200 | СБЕР; ID 3529; 3328 открытых вакансий |
+| 4 | `/vacancies?employer_id=3529&per_page=1&page=0` | 200 | found=3328; получена 1 вакансия Сбера |
+| 5 | `/employers/11036409` | 200 | ПУЛЬС; ID 11036409; 1 открытая вакансия |
+| 6 | `/areas/113` | 200 | Россия; ID 113; 89 дочерних элементов справочника HH |
+| 7 | `/vacancies/136954492` | 200 | Инцидент-менеджер; employer_id=11685629; описание 3824 символа |
+
+Подтверждены совпадение ID работодателя в профиле, выдаче и деталях вакансии,
+согласованность счётчика профиля с поиском и наличие непустого описания вакансии.
+Проверка является выборочной: все 45 работодателей и полная выдача не проверялись.
+Число вакансий — снимок на момент запросов, оно может измениться.
+
+Первоначальный HTTP 403 был получен при проверке публичного API без токена.
+Текущие успешные запросы подтверждают доступ с авторизацией приложения;
+причина прежнего отказа отдельно не диагностировалась.
+
+Санитизированные результаты: `output/hh-api-check/results-2026-09-05.json`.
