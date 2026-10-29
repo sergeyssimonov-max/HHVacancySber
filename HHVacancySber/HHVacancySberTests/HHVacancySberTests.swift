@@ -1273,6 +1273,35 @@ final class HHVacancySberTests: XCTestCase {
     }
 
     @MainActor
+    func testRefreshAcceptsVacanciesAddedDuringPartitionedCollection() async throws {
+        let directory = temporaryDirectory()
+        let store = VacancySnapshotStore(fileURL: directory.appendingPathComponent("vacancies.json"))
+        let client = GrowingPartitionClient()
+        let model = VacancySearchViewModel(apiClient: client,
+            employerStore: TestEmployerStore(entries: [.init(id: "1", name: "One", comment: "test")]),
+            areaStore: AreaDirectoryStore(fileURL: directory.appendingPathComponent("areas.json")),
+            snapshotStore: store)
+
+        await model.refreshVacancies()
+        XCTAssertEqual(model.results.count, 2_001)
+        XCTAssertNil(model.collectionWarning)
+        await client.growOnNextCollection()
+        await model.refreshVacancies()
+
+        XCTAssertNil(model.errorMessage)
+        XCTAssertNil(model.collectionWarning)
+        XCTAssertEqual(model.results.count, 2_002)
+        XCTAssertTrue(model.results.contains { $0.id == "new-vacancy" })
+        let snapshot = try XCTUnwrap(store.load())
+        XCTAssertTrue(snapshot.issues.isEmpty)
+        XCTAssertEqual(snapshot.vacancies.count, 2_002)
+        XCTAssertTrue(snapshot.vacancies.contains { $0.summary.id == "new-vacancy" })
+        let requests = await client.requests
+        XCTAssertEqual(requests.filter { $0.areaID == "113" }.count, 2)
+        XCTAssertFalse(requests.contains { $0.dateFrom != nil || $0.dateTo != nil })
+    }
+
+    @MainActor
     func testIncompleteRefreshPreservesPreviousCompleteSelection() async {
         let client = EmployerScriptedClient(behaviors: ["1": .vacancies(150)])
         let model = VacancySearchViewModel(apiClient: client,
@@ -4437,5 +4466,38 @@ private final class TestSupportFileManager: FileManager, @unchecked Sendable {
     override var temporaryDirectory: URL {
         XCTFail("Persistent data must never fall back to TMPDIR")
         return super.temporaryDirectory
+    }
+}
+
+private actor GrowingPartitionClient: HHVacancyAPIClient {
+    private var grow = false
+    private var published = false
+    private(set) var requests: [HHVacancySearchRequest] = []
+    func growOnNextCollection() { grow = true }
+    nonisolated func validateVacanciesAccess() throws {}
+    func areaTree() async throws -> HHAreaNode {
+        .init(id: "113", name: "Россия", areas: [.init(id: "10", name: "A"), .init(id: "20", name: "B")])
+    }
+    func vacancyDictionaries() async throws -> HHVacancyDictionaries {
+        XCTFail("Date/dictionary split should not be needed")
+        return .init(experience: [], workFormat: [], schedule: [])
+    }
+    func vacancyDetails(id: String) async throws -> HHVacancyDetails { throw HHAPIError.invalidResponse }
+    func searchVacancies(_ request: HHVacancySearchRequest) async throws -> HHVacancySearchResponse {
+        requests.append(request)
+        if request.areaID == "113" {
+            published = false
+            return .init(items: [], found: 2_001, pages: 20, page: 0, perPage: request.perPage)
+        }
+        if grow && request.areaID == "10" { published = true }
+        let count = request.areaID == "10" ? (published ? 1_001 : 1_000) : 1_001
+        let start = request.page * request.perPage
+        let end = min(start + request.perPage, count)
+        let items: [HHVacancySummary] = start < end ? (start..<end).map { index in
+            let id = request.areaID == "10" && index == 1_000 ? "new-vacancy" : "\(request.areaID)-\(index)"
+            return HHVacancySummary(id: id, name: "Вакансия \(id)", employer: .init(name: "One", id: "1"),
+                salary: nil, area: .init(id: request.areaID, name: "Регион"), alternateURL: nil, url: nil, snippet: nil)
+        } : []
+        return .init(items: items, found: count, pages: (count + 99) / 100, page: request.page, perPage: request.perPage)
     }
 }
